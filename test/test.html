@@ -1,0 +1,19 @@
+<pre id="o"></pre>
+<script src="../src/solver.js"></script>
+<script>
+const out = (s) => (document.getElementById('o').textContent += s + "\n");
+window.runTest = function (opts, T) {
+  document.getElementById('o').textContent = '';
+  for (const N of [16, 24]) { const f = new FFT1(N); for (let i=0;i<N;i++){f.re[i]=Math.sin(3*2*Math.PI*i/N);f.im[i]=0;} f.run(-1); f.run(1); let e=0; for(let i=0;i<N;i++) e=Math.max(e,Math.abs(f.re[i]/N-Math.sin(3*2*Math.PI*i/N))); out('fft '+N+' '+e.toExponential(2)); }
+  const s = new OpenChannelDNS(opts); window.sim = s;
+  out(`init div ${s.maxDiv().toExponential(2)} Ub ${s.bulk().toFixed(6)} Re_tau ${s.reTau().toFixed(1)}`);
+  let t0 = performance.now(), last = 0;
+  while (s.t < T) {
+    s.step();
+    if (s.t - last > T/12) { last = s.t; out(`t=${s.t.toFixed(1)} dt=${s.dt.toFixed(4)} Re_tau=${s.reTau().toFixed(1)} tke=${s.tke().toFixed(5)} div=${s.maxDiv().toExponential(1)} Ub=${s.bulk().toFixed(6)} -dPdx=${s.dpdx.toFixed(5)}`); }
+    if (!isFinite(s.u[0])) { out('NaN at step ' + s.nstep); break; }
+  }
+  out('steps ' + s.nstep + ' ms/step ' + ((performance.now()-t0)/s.nstep).toFixed(2));
+  return document.getElementById('o').textContent;
+};
+</script>
