@@ -200,7 +200,7 @@ details.about p { max-width: 65ch; margin: 8px 0 0; }
             <label><input type="radio" name="field" value="up" id="fUp"><span>u′</span></label>
             <label><input type="radio" name="field" value="v" id="fV"><span>v</span></label>
             <label><input type="radio" name="field" value="w" id="fW"><span>w</span></label>
-            <label><input type="radio" name="field" value="oz" id="fOz"><span>ω<sub>z</sub></span></label>
+            <label><input type="radio" name="field" value="oz" id="fOz"><span>ω<sub>z</sub>′</span></label>
           </div>
           <div class="cbar"><canvas id="cBar" width="256" height="1"></canvas><div class="axis"><span id="cbMin">–</span><span id="cbMid"></span><span id="cbMax">–</span></div></div>
         </div>
@@ -1071,7 +1071,7 @@ function sampler() {
   // All samplers take (i, j, k) = (x, y, z) cell indices.
   const s = sim, { Nx, Ny, n, u, v, w, ip, im, kp, yc } = s;
   const mean = new Float64Array(Ny);
-  if (field === "up") for (let j = 0; j < Ny; j++) mean[j] = s.planeMean(u, j);
+  if (field === "up" || field === "oz") for (let j = 0; j < Ny; j++) mean[j] = s.planeMean(u, j);
   const uc = (i, j, k) => 0.5 * (u[i + Nx * k + n * j] + u[ip[i] + Nx * k + n * j]);
   const wc = (i, j, k) => 0.5 * (w[i + Nx * k + n * j] + w[i + Nx * kp[k] + n * j]);
   const vc = (i, j, k) => 0.5 * (v[i + Nx * k + n * j] + v[i + Nx * k + n * (j + 1)]);
@@ -1080,10 +1080,12 @@ function sampler() {
     case "up": return (i, j, k) => uc(i, j, k) - mean[j];
     case "v": return vc;
     case "w": return wc;
-    // spanwise vorticity  omega_z = dv/dx - du/dy  (ghosts: u = 0 at the wall, du/dy = 0 at the surface)
+    // fluctuating spanwise vorticity  omega_z' = dv'/dx - du'/dy, with u' = u - <u>(y)
+    // (<dv/dx> = 0 in a periodic box; ghosts: u = 0 at the wall, du/dy = 0 at the surface)
     case "oz": return (i, j, k) => {
-      const uT = j < Ny - 1 ? uc(i, j + 1, k) : uc(i, j, k), yT = j < Ny - 1 ? yc[j + 1] : 2 - yc[j];
-      const uB = j > 0 ? uc(i, j - 1, k) : -uc(i, j, k), yB = j > 0 ? yc[j - 1] : -yc[j];
+      const top = j < Ny - 1, bot = j > 0;
+      const uT = top ? uc(i, j + 1, k) - mean[j + 1] : uc(i, j, k) - mean[j], yT = top ? yc[j + 1] : 2 - yc[j];
+      const uB = bot ? uc(i, j - 1, k) - mean[j - 1] : -(uc(i, j, k) - mean[j]), yB = bot ? yc[j - 1] : -yc[j];
       return (vc(ip[i], j, k) - vc(im[i], j, k)) / (2 * s.dx) - (uT - uB) / (yT - yB);
     };
   }
@@ -1104,7 +1106,7 @@ function updateRange() {
   const fmt = (x) => (Math.abs(x) >= 10 ? x.toFixed(0) : x.toFixed(2));
   $("cbMin").textContent = fmt(range.lo); $("cbMax").textContent = fmt(range.hi);
   $("cbMid").textContent = field === "u" ? "" : "0";
-  const names = { u: "u / U_b", up: "u′ / U_b (minus plane mean)", v: "v / U_b", w: "w / U_b", oz: "ω_z h / U_b" };
+  const names = { u: "u / U_b", up: "u′ / U_b (minus plane mean)", v: "v / U_b", w: "w / U_b", oz: "ω_z′ h / U_b (minus plane mean)" };
   $("fieldInfo").textContent = names[field];
 }
 
