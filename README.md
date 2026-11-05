@@ -3,9 +3,9 @@
 An interactive direct numerical simulation (DNS) of turbulent open channel flow that runs in the browser, on phones as well as desktops. No installation or server-side code is needed.
 
 - **Geometry:** periodic in x (streamwise) and z (spanwise), with a no-slip wall at y = 0 and a free-slip, rigid-lid surface at y = h.
-- **Forcing:** constant mass flux. The bulk velocity is held at U_b = 1 by a uniform pressure gradient.
+- **Forcing:** constant streamwise mass flux. A uniform streamwise pressure gradient holds U_b = 1; there is no mean spanwise pressure gradient.
 - **Settings:** bulk Reynolds number Re_b = U_b h / ν, domain lengths L_x and L_z, and grid sizes N_x, N_y, N_z. Wall stretching, CFL number and the initial disturbances can also be set.
-- **Output:** live x–z, x–y and z–y slices of u, u′, v, w and ω_x; mean velocity and Reynolds-stress profiles in wall units; and time histories of Re_τ and the fluctuation energy.
+- **Output:** live x–z, x–y and z–y slices of u, u′, v, w and ω_z; mean velocity and Reynolds-stress profiles in wall units; and time histories of Re_τ and the fluctuation energy.
 
 ## Numerics
 

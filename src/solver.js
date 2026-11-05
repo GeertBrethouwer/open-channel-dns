@@ -199,6 +199,11 @@ class OpenChannelDNS {
         v[i + Nx * k + n * j] = A * env * (field(mv, (i + 0.5) * dx, (k + 0.5) * dz) + 0.1 * (rnd() - 0.5));
       }
     }
+    // remove any plane-mean spanwise velocity introduced by the random noise
+    for (let j = 0; j < Ny; j++) {
+      const mw = this.planeMean(w, j), o = n * j;
+      for (let m = 0; m < n; m++) w[o + m] -= mw;
+    }
     this.project(1);
     this.fixFlux(1);
     this.computeDt(true);
@@ -482,22 +487,37 @@ class OpenChannelDNS {
     }
   }
 
-  bulk() {
-    const { Ny, n, u, dyc } = this;
+  // Bulk (volume-averaged) velocity of a cell-height-staggered component (u or w).
+  bulk(arr) {
+    const { Ny, n, dyc } = this;
+    const a = arr || this.u;
     let ub = 0;
     for (let j = 0; j < Ny; j++) {
       let s = 0; const o = n * j;
-      for (let m = 0; m < n; m++) s += u[o + m];
+      for (let m = 0; m < n; m++) s += a[o + m];
       ub += (s / n) * dyc[j];
     }
     return ub;
   }
 
+  // Constant streamwise mass flux U_b = 1, applied as a uniform mean pressure gradient in x.
+  // There is no mean spanwise pressure gradient: the spanwise flow is left free.
+  // Returns -dP/dx of this substage.
   fixFlux(adt) {
-    const corr = 1 - this.bulk();
+    const cu = 1 - this.bulk(this.u);
     const u = this.u;
-    for (let I = 0; I < u.length; I++) u[I] += corr;
-    return corr / adt; // mean pressure gradient (-dP/dx) applied in this substage
+    for (let I = 0; I < u.length; I++) u[I] += cu;
+    return cu / adt;
+  }
+
+  // Plane-averaged spanwise velocity: bulk value and largest |<w>(y)|.
+  meanSpanwise() {
+    let bulk = 0, peak = 0;
+    for (let j = 0; j < this.Ny; j++) {
+      const m = this.planeMean(this.w, j);
+      bulk += m * this.dyc[j]; peak = Math.max(peak, Math.abs(m));
+    }
+    return { bulk, peak };
   }
 
   computeDt(init) {
@@ -597,7 +617,7 @@ class OpenChannelDNS {
   resetStats() {
     const Ny = this.Ny;
     this.st = {
-      T: 0, t0: this.t || 0, U: new Float64Array(Ny), uu: new Float64Array(Ny), vv: new Float64Array(Ny),
+      T: 0, t0: this.t || 0, U: new Float64Array(Ny), W: new Float64Array(Ny), uu: new Float64Array(Ny), vv: new Float64Array(Ny),
       ww: new Float64Array(Ny), uv: new Float64Array(Ny), tw: 0,
     };
   }
@@ -612,6 +632,7 @@ class OpenChannelDNS {
       }
       su /= n; sv /= n; sw /= n;
       st.U[j] += dt * su;
+      st.W[j] += dt * sw;
       st.uu[j] += dt * (suu / n - su * su);
       st.vv[j] += dt * (svv / n - sv * sv);
       st.ww[j] += dt * (sww / n - sw * sw);
@@ -624,10 +645,11 @@ class OpenChannelDNS {
     const { st, Ny } = this;
     if (st.T <= 0) return null;
     const T = st.T, tw = st.tw / T, ut = Math.sqrt(Math.max(tw, 1e-30));
-    const out = { T, t0: st.t0, utau: ut, reTau: ut / this.nu, yp: [], Up: [], urms: [], vrms: [], wrms: [], uv: [] };
+    const out = { T, t0: st.t0, utau: ut, reTau: ut / this.nu, yp: [], Up: [], Wp: [], urms: [], vrms: [], wrms: [], uv: [] };
     for (let j = 0; j < Ny; j++) {
       out.yp.push((this.yc[j] * ut) / this.nu);
       out.Up.push(st.U[j] / T / ut);
+      out.Wp.push(st.W[j] / T / ut);
       out.urms.push(Math.sqrt(Math.max(st.uu[j] / T, 0)) / ut);
       out.vrms.push(Math.sqrt(Math.max(st.vv[j] / T, 0)) / ut);
       out.wrms.push(Math.sqrt(Math.max(st.ww[j] / T, 0)) / ut);

@@ -188,7 +188,7 @@ details.about p { max-width: 65ch; margin: 8px 0 0; }
             <label><input type="radio" name="field" value="up" id="fUp"><span>u′</span></label>
             <label><input type="radio" name="field" value="v" id="fV"><span>v</span></label>
             <label><input type="radio" name="field" value="w" id="fW"><span>w</span></label>
-            <label><input type="radio" name="field" value="ox" id="fOx"><span>ω<sub>x</sub></span></label>
+            <label><input type="radio" name="field" value="oz" id="fOz"><span>ω<sub>z</sub></span></label>
           </div>
           <div class="cbar"><canvas id="cBar" width="256" height="1"></canvas><div class="axis"><span id="cbMin">–</span><span id="cbMid"></span><span id="cbMax">–</span></div></div>
         </div>
@@ -212,6 +212,7 @@ details.about p { max-width: 65ch; margin: 8px 0 0; }
       <div class="plot"><canvas id="pMean" height="230"></canvas></div>
       <div class="legend">
         <span><i style="background:var(--s1)"></i>U⁺</span>
+        <span><i style="background:var(--s2)"></i>W⁺ (mean spanwise)</span>
         <span><i class="dash"></i>U⁺ = y⁺ and U⁺ = ln(y⁺)/0.41 + 5.2</span>
       </div>
     </section>
@@ -273,7 +274,7 @@ details.about p { max-width: 65ch; margin: 8px 0 0; }
         <summary>About the numerics</summary>
         <p>Incompressible Navier–Stokes in a box periodic in x and z, with a no-slip wall at y = 0 and a free-slip, rigid-lid surface at y = h (∂u/∂y = ∂w/∂y = 0, v = 0). Lengths are scaled by h and velocities by the bulk velocity U<sub>b</sub>, so ν = 1/Re<sub>b</sub>.</p>
         <p>Second-order central differences on a staggered (MAC) grid, with the convective terms in divergence form. The grid is uniform in x and z and clustered at the wall with a tanh mapping in y; the surface end is left coarse.</p>
-        <p>Time stepping uses the low-storage three-stage Runge–Kutta scheme of Wray for convection and the x–z viscous terms, and Crank–Nicolson for the wall-normal viscous term. Each stage ends with a projection: the pressure Poisson equation is solved exactly with FFTs in x and z (modified wavenumbers) and a tridiagonal solve in y. After every stage a uniform pressure gradient restores U<sub>b</sub> = 1, so the mass flux stays constant. Δt follows the CFL number you set.</p>
+        <p>Time stepping uses the low-storage three-stage Runge–Kutta scheme of Wray for convection and the x–z viscous terms, and Crank–Nicolson for the wall-normal viscous term. Each stage ends with a projection: the pressure Poisson equation is solved exactly with FFTs in x and z (modified wavenumbers) and a tridiagonal solve in y. After every stage a uniform streamwise pressure gradient restores U<sub>b</sub> = 1, so the mass flux stays constant. There is no mean spanwise pressure gradient; the initial field has no mean spanwise flow, and any mean spanwise flow that develops in a small box is left free and averages out over long times. Δt follows the CFL number you set.</p>
         <p>The initial field is a mean profile plus a few divergence-free large-scale modes (streamwise and spanwise wavelengths of the box size and its halves and thirds) with a little noise. Re<sub>τ</sub> is taken from the mean wall shear. The default box (π × π/2 at Re<sub>b</sub> = 2000, Re<sub>τ</sub> ≈ 130) is just above the minimal flow unit, and Δx⁺ ≈ 13 and Δz⁺ ≈ 6.5 are coarse for a second-order scheme, so treat the statistics as indicative.</p>
       </details>
     </section>
@@ -481,6 +482,11 @@ class OpenChannelDNS {
       for (let k = 0; k < Nz; k++) for (let i = 0; i < Nx; i++) {
         v[i + Nx * k + n * j] = A * env * (field(mv, (i + 0.5) * dx, (k + 0.5) * dz) + 0.1 * (rnd() - 0.5));
       }
+    }
+    // remove any plane-mean spanwise velocity introduced by the random noise
+    for (let j = 0; j < Ny; j++) {
+      const mw = this.planeMean(w, j), o = n * j;
+      for (let m = 0; m < n; m++) w[o + m] -= mw;
     }
     this.project(1);
     this.fixFlux(1);
@@ -765,22 +771,37 @@ class OpenChannelDNS {
     }
   }
 
-  bulk() {
-    const { Ny, n, u, dyc } = this;
+  // Bulk (volume-averaged) velocity of a cell-height-staggered component (u or w).
+  bulk(arr) {
+    const { Ny, n, dyc } = this;
+    const a = arr || this.u;
     let ub = 0;
     for (let j = 0; j < Ny; j++) {
       let s = 0; const o = n * j;
-      for (let m = 0; m < n; m++) s += u[o + m];
+      for (let m = 0; m < n; m++) s += a[o + m];
       ub += (s / n) * dyc[j];
     }
     return ub;
   }
 
+  // Constant streamwise mass flux U_b = 1, applied as a uniform mean pressure gradient in x.
+  // There is no mean spanwise pressure gradient: the spanwise flow is left free.
+  // Returns -dP/dx of this substage.
   fixFlux(adt) {
-    const corr = 1 - this.bulk();
+    const cu = 1 - this.bulk(this.u);
     const u = this.u;
-    for (let I = 0; I < u.length; I++) u[I] += corr;
-    return corr / adt; // mean pressure gradient (-dP/dx) applied in this substage
+    for (let I = 0; I < u.length; I++) u[I] += cu;
+    return cu / adt;
+  }
+
+  // Plane-averaged spanwise velocity: bulk value and largest |<w>(y)|.
+  meanSpanwise() {
+    let bulk = 0, peak = 0;
+    for (let j = 0; j < this.Ny; j++) {
+      const m = this.planeMean(this.w, j);
+      bulk += m * this.dyc[j]; peak = Math.max(peak, Math.abs(m));
+    }
+    return { bulk, peak };
   }
 
   computeDt(init) {
@@ -880,7 +901,7 @@ class OpenChannelDNS {
   resetStats() {
     const Ny = this.Ny;
     this.st = {
-      T: 0, t0: this.t || 0, U: new Float64Array(Ny), uu: new Float64Array(Ny), vv: new Float64Array(Ny),
+      T: 0, t0: this.t || 0, U: new Float64Array(Ny), W: new Float64Array(Ny), uu: new Float64Array(Ny), vv: new Float64Array(Ny),
       ww: new Float64Array(Ny), uv: new Float64Array(Ny), tw: 0,
     };
   }
@@ -895,6 +916,7 @@ class OpenChannelDNS {
       }
       su /= n; sv /= n; sw /= n;
       st.U[j] += dt * su;
+      st.W[j] += dt * sw;
       st.uu[j] += dt * (suu / n - su * su);
       st.vv[j] += dt * (svv / n - sv * sv);
       st.ww[j] += dt * (sww / n - sw * sw);
@@ -907,10 +929,11 @@ class OpenChannelDNS {
     const { st, Ny } = this;
     if (st.T <= 0) return null;
     const T = st.T, tw = st.tw / T, ut = Math.sqrt(Math.max(tw, 1e-30));
-    const out = { T, t0: st.t0, utau: ut, reTau: ut / this.nu, yp: [], Up: [], urms: [], vrms: [], wrms: [], uv: [] };
+    const out = { T, t0: st.t0, utau: ut, reTau: ut / this.nu, yp: [], Up: [], Wp: [], urms: [], vrms: [], wrms: [], uv: [] };
     for (let j = 0; j < Ny; j++) {
       out.yp.push((this.yc[j] * ut) / this.nu);
       out.Up.push(st.U[j] / T / ut);
+      out.Wp.push(st.W[j] / T / ut);
       out.urms.push(Math.sqrt(Math.max(st.uu[j] / T, 0)) / ut);
       out.vrms.push(Math.sqrt(Math.max(st.vv[j] / T, 0)) / ut);
       out.wrms.push(Math.sqrt(Math.max(st.ww[j] / T, 0)) / ut);
@@ -1033,20 +1056,23 @@ function start(p) {
 
 // ---------- field sampling at cell centres ----------
 function sampler() {
-  const s = sim, { Nx, Ny, Nz, n, u, v, w, ip, kp, km, yc } = s;
+  // All samplers take (i, j, k) = (x, y, z) cell indices.
+  const s = sim, { Nx, Ny, n, u, v, w, ip, im, kp, yc } = s;
   const mean = new Float64Array(Ny);
-  if (field === "up") for (let j = 0; j < Ny; j++) mean[j] = s.planeMean(u, j) ;
+  if (field === "up") for (let j = 0; j < Ny; j++) mean[j] = s.planeMean(u, j);
+  const uc = (i, j, k) => 0.5 * (u[i + Nx * k + n * j] + u[ip[i] + Nx * k + n * j]);
   const wc = (i, j, k) => 0.5 * (w[i + Nx * k + n * j] + w[i + Nx * kp[k] + n * j]);
   const vc = (i, j, k) => 0.5 * (v[i + Nx * k + n * j] + v[i + Nx * k + n * (j + 1)]);
   switch (field) {
-    case "u": return (i, j, k) => 0.5 * (u[i + Nx * k + n * j] + u[ip[i] + Nx * k + n * j]);
-    case "up": return (i, j, k) => 0.5 * (u[i + Nx * k + n * j] + u[ip[i] + Nx * k + n * j]) - mean[j];
+    case "u": return uc;
+    case "up": return (i, j, k) => uc(i, j, k) - mean[j];
     case "v": return vc;
     case "w": return wc;
-    case "ox": return (i, j, k) => {
-      const wT = j < Ny - 1 ? wc(i, j + 1, k) : wc(i, j, k), yT = j < Ny - 1 ? yc[j + 1] : 2 - yc[j];
-      const wB = j > 0 ? wc(i, j - 1, k) : -wc(i, j, k), yB = j > 0 ? yc[j - 1] : -yc[j];
-      return (wT - wB) / (yT - yB) - (vc(i, j, kp[k]) - vc(i, j, km[k])) / (2 * s.dz);
+    // spanwise vorticity  omega_z = dv/dx - du/dy  (ghosts: u = 0 at the wall, du/dy = 0 at the surface)
+    case "oz": return (i, j, k) => {
+      const uT = j < Ny - 1 ? uc(i, j + 1, k) : uc(i, j, k), yT = j < Ny - 1 ? yc[j + 1] : 2 - yc[j];
+      const uB = j > 0 ? uc(i, j - 1, k) : -uc(i, j, k), yB = j > 0 ? yc[j - 1] : -yc[j];
+      return (vc(ip[i], j, k) - vc(im[i], j, k)) / (2 * s.dx) - (uT - uB) / (yT - yB);
     };
   }
 }
@@ -1066,7 +1092,7 @@ function updateRange() {
   const fmt = (x) => (Math.abs(x) >= 10 ? x.toFixed(0) : x.toFixed(2));
   $("cbMin").textContent = fmt(range.lo); $("cbMax").textContent = fmt(range.hi);
   $("cbMid").textContent = field === "u" ? "" : "0";
-  const names = { u: "u / U_b", up: "u′ / U_b (minus plane mean)", v: "v / U_b", w: "w / U_b", ox: "ω_x h / U_b" };
+  const names = { u: "u / U_b", up: "u′ / U_b (minus plane mean)", v: "v / U_b", w: "w / U_b", oz: "ω_z h / U_b" };
   $("fieldInfo").textContent = names[field];
 }
 
@@ -1134,7 +1160,8 @@ function drawAll() {
   // plan: canvas row 0 = top = z max
   paint(views.plan.off, Nx, Nz, (c, r) => f(c, sel.j, Nz - 1 - r));
   paint(views.side.off, Nx, H, (c, r) => f(c, rowJ[r], sel.k));
-  paint(views.end.off, Nz, H, (c, r) => f(c, rowJ[r], sel.i));
+  // end view: z runs horizontally, so the column is the spanwise index at fixed x
+  paint(views.end.off, Nz, H, (c, r) => f(sel.i, rowJ[r], c));
   for (const k in views) blit(views[k]);
   // slice guides
   const P = views.plan.c, S = views.side.c, E = views.end.c;
@@ -1241,13 +1268,13 @@ function profiles() {
   const st = avgStarted ? sim.stats() : null;
   if (st) return st;
   // instantaneous plane averages, scaled by the instantaneous friction velocity
-  const s = sim, ut = Math.sqrt(Math.max(s.wallShear(), 1e-12)), out = { yp: [], Up: [], urms: [], vrms: [], wrms: [], uv: [], reTau: ut / s.nu };
+  const s = sim, ut = Math.sqrt(Math.max(s.wallShear(), 1e-12)), out = { yp: [], Up: [], Wp: [], urms: [], vrms: [], wrms: [], uv: [], reTau: ut / s.nu };
   const { Ny, n, u, v, w } = s;
   for (let j = 0; j < Ny; j++) {
     const o = n * j; let su = 0, sv = 0, sw = 0, suu = 0, svv = 0, sww = 0, suv = 0;
     for (let m = 0; m < n; m++) { const a = u[o + m], b = 0.5 * (v[o + m] + v[o + n + m]), c = w[o + m]; su += a; sv += b; sw += c; suu += a * a; svv += b * b; sww += c * c; suv += a * b; }
     su /= n; sv /= n; sw /= n;
-    out.yp.push(s.yc[j] * ut / s.nu); out.Up.push(su / ut);
+    out.yp.push(s.yc[j] * ut / s.nu); out.Up.push(su / ut); out.Wp.push(sw / ut);
     out.urms.push(Math.sqrt(Math.max(suu / n - su * su, 0)) / ut); out.vrms.push(Math.sqrt(Math.max(svv / n - sv * sv, 0)) / ut);
     out.wrms.push(Math.sqrt(Math.max(sww / n - sw * sw, 0)) / ut); out.uv.push(-(suv / n - su * sv) / (ut * ut));
   }
@@ -1258,13 +1285,14 @@ function drawPlots() {
   const P = profiles(), x0 = Math.max(0.1, Math.pow(10, Math.floor(Math.log10(P.yp[0])))), x1 = Math.max(P.reTau * 1.05, 10);
   const yl = []; for (let k = 0; k <= 60; k++) { const y = x0 * Math.pow(x1 / x0, k / 60); yl.push(y); }
   const s1 = css("--s1"), s2 = css("--s2"), s3 = css("--s3"), s4 = css("--s4"), ref = css("--ref");
-  const Umax = Math.max(...P.Up);
+  const Umax = Math.max(...P.Up), Wmin = Math.min(0, ...P.Wp);
   drawChart($("pMean"), {
-    xlog: true, x0, x1, y0: 0, y1: Math.max(20, Math.ceil(Umax / 5) * 5), xlabel: "y⁺", xname: "y⁺",
+    xlog: true, x0, x1, y0: Wmin < -0.5 ? Math.floor(Wmin) : 0, y1: Math.max(20, Math.ceil(Umax / 5) * 5), xlabel: "y⁺", xname: "y⁺",
     series: [
       { x: yl.filter((y) => y < 12), y: yl.filter((y) => y < 12), color: ref, width: 1.5, dash: [5, 4], hover: false },
       { x: yl.filter((y) => y > 8), y: yl.filter((y) => y > 8).map((y) => Math.log(y) / 0.41 + 5.2), color: ref, width: 1.5, dash: [5, 4], hover: false },
       { x: P.yp, y: P.Up, color: s1, width: 2, label: "U⁺" },
+      { x: P.yp, y: P.Wp, color: s2, width: 2, label: "W⁺" },
     ],
   });
   const rmax = Math.max(3, ...P.urms);
