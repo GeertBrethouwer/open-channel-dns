@@ -9,3 +9,4 @@ android/app/.cxx/
 android/local.properties
 *.keystore
 *.jks
+dist/
