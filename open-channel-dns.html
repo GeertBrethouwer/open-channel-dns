@@ -153,6 +153,7 @@ details.about p { max-width: 65ch; margin: 8px 0 0; }
     <span class="chip">Re<sub>τ</sub> <b id="cRt">–</b></span>
     <span class="chip">Δt <b id="cDt">–</b></span>
     <span class="chip"><b id="cSps">–</b> steps/s</span>
+    <span class="chip" id="cEngine" title="Solver engine and floating-point precision">–</span>
   </div>
   <div class="btns">
     <button class="primary" id="runBtn" type="button">Run</button>
@@ -323,7 +324,53 @@ class FFT1 {
         this.cs[i] = Math.cos((2 * Math.PI * i) / N);
         this.sn[i] = Math.sin((2 * Math.PI * i) / N);
       }
+      // mixed-radix plan when N = 2^a 3^b 5^c
+      const radices = [];
+      let r = N;
+      for (const p of [5, 3, 2]) while (r % p === 0) { radices.push(p); r /= p; }
+      this.smooth = r === 1;
+      if (this.smooth) {
+        this.stages = [];
+        let ncur = N;
+        for (const p of radices) {
+          const m = ncur / p, c = new Float64Array(m * p), s = new Float64Array(m * p);
+          for (let k = 0; k < m; k++) for (let t = 0; t < p; t++) {
+            c[k * p + t] = Math.cos((2 * Math.PI * k * t) / ncur);
+            s[k * p + t] = Math.sin((2 * Math.PI * k * t) / ncur);
+          }
+          const rc = new Float64Array(p), rs = new Float64Array(p);
+          for (let j = 0; j < p; j++) { rc[j] = Math.cos((2 * Math.PI * j) / p); rs[j] = Math.sin((2 * Math.PI * j) / p); }
+          this.stages.push({ p, m, c, s, rc, rs });
+          ncur = m;
+        }
+        this.ar = new Float64Array(5); this.ai = new Float64Array(5);
+      }
     }
+  }
+  // Self-sorting (Stockham) mixed-radix FFT for N = 2^a 3^b 5^c, using tr/ti as work arrays.
+  mixed(sign) {
+    let xr = this.re, xi = this.im, yr = this.tr, yi = this.ti, s = 1;
+    const ar = this.ar, ai = this.ai;
+    for (const st of this.stages) {
+      const { p, m, c, s: sn, rc, rs } = st;
+      for (let k = 0; k < m; k++) {
+        for (let q = 0; q < s; q++) {
+          for (let r = 0; r < p; r++) { const o = q + s * (k + r * m); ar[r] = xr[o]; ai[r] = xi[o]; }
+          for (let t = 0; t < p; t++) {
+            let sr = 0, si = 0;
+            for (let r = 0; r < p; r++) {
+              const j = (r * t) % p, wr = rc[j], wi = sign * rs[j];
+              sr += ar[r] * wr - ai[r] * wi; si += ar[r] * wi + ai[r] * wr;
+            }
+            const wr = c[k * p + t], wi = sign * sn[k * p + t], o = q + s * (p * k + t);
+            yr[o] = sr * wr - si * wi; yi[o] = sr * wi + si * wr;
+          }
+        }
+      }
+      let tmp = xr; xr = yr; yr = tmp; tmp = xi; xi = yi; yi = tmp;
+      s *= p;
+    }
+    if (xr !== this.re) { this.re.set(xr); this.im.set(xi); }
   }
   // In-place transform of this.re/this.im. sign = -1 forward, +1 inverse (unscaled).
   run(sign) {
@@ -350,6 +397,8 @@ class FFT1 {
           }
         }
       }
+    } else if (this.smooth) {
+      this.mixed(sign);
     } else {
       const tr = this.tr, ti = this.ti, cs = this.cs, sn = this.sn;
       for (let m = 0; m < N; m++) {
@@ -382,7 +431,7 @@ class OpenChannelDNS {
   constructor(opt) {
     const o = Object.assign({
       Re: 2000, Lx: Math.PI, Lz: Math.PI / 2, Nx: 32, Ny: 48, Nz: 32,
-      stretch: 1.8, cfl: 1.2, init: "turbulent", amp: 0.3, seed: 1,
+      stretch: 1.8, cfl: 1.2, init: "turbulent", amp: 0.3, seed: 1, tavg: 50,
     }, opt || {});
     this.opt = o;
     this.Re = o.Re; this.nu = 1 / o.Re;
@@ -854,6 +903,7 @@ class OpenChannelDNS {
     this.t += dt;
     this.nstep++;
     this.accumulate(dt);
+    if (!this.avgOn && this.t >= this.opt.tavg) { this.resetStats(); this.avgOn = true; }
     if (this.nstep % 5 === 0) this.record();
   }
 
@@ -941,7 +991,78 @@ class OpenChannelDNS {
     }
     return out;
   }
+
+  startAveragingNow() { this.resetStats(); this.avgOn = true; }
+
+  // Averaged statistics once averaging has started, otherwise instantaneous plane averages.
+  profiles() {
+    const st = this.avgOn ? this.stats() : null;
+    if (st) return Object.assign(st, { averaged: true });
+    const ut = Math.sqrt(Math.max(this.wallShear(), 1e-12));
+    const out = { averaged: false, T: 0, t0: 0, reTau: ut / this.nu, yp: [], Up: [], Wp: [], urms: [], vrms: [], wrms: [], uv: [] };
+    const { Ny, n, u, v, w } = this;
+    for (let j = 0; j < Ny; j++) {
+      const o = n * j; let su = 0, sv = 0, sw = 0, suu = 0, svv = 0, sww = 0, suv = 0;
+      for (let m = 0; m < n; m++) {
+        const a = u[o + m], b = 0.5 * (v[o + m] + v[o + n + m]), c = w[o + m];
+        su += a; sv += b; sw += c; suu += a * a; svv += b * b; sww += c * c; suv += a * b;
+      }
+      su /= n; sv /= n; sw /= n;
+      out.yp.push((this.yc[j] * ut) / this.nu); out.Up.push(su / ut); out.Wp.push(sw / ut);
+      out.urms.push(Math.sqrt(Math.max(suu / n - su * su, 0)) / ut);
+      out.vrms.push(Math.sqrt(Math.max(svv / n - sv * sv, 0)) / ut);
+      out.wrms.push(Math.sqrt(Math.max(sww / n - sw * sw, 0)) / ut);
+      out.uv.push(-(suv / n - su * sv) / (ut * ut));
+    }
+    return out;
+  }
+
+  // ---------- display fields (codes: 0 u, 1 u', 2 v, 3 w, 4 omega_z') ----------
+  sampler(field) {
+    const { Nx, Ny, n, u, v, w, ip, im, kp, yc } = this;
+    const mean = new Float64Array(Ny);
+    if (field === 1 || field === 4) for (let j = 0; j < Ny; j++) mean[j] = this.planeMean(u, j);
+    const uc = (i, j, k) => 0.5 * (u[i + Nx * k + n * j] + u[ip[i] + Nx * k + n * j]);
+    const wc = (i, j, k) => 0.5 * (w[i + Nx * k + n * j] + w[i + Nx * kp[k] + n * j]);
+    const vc = (i, j, k) => 0.5 * (v[i + Nx * k + n * j] + v[i + Nx * k + n * (j + 1)]);
+    switch (field) {
+      case 0: return uc;
+      case 1: return (i, j, k) => uc(i, j, k) - mean[j];
+      case 2: return vc;
+      case 3: return wc;
+      default: // fluctuating spanwise vorticity omega_z' = dv'/dx - du'/dy (u = 0 at the wall, du/dy = 0 at the surface)
+        return (i, j, k) => {
+          const top = j < Ny - 1, bot = j > 0;
+          const uT = top ? uc(i, j + 1, k) - mean[j + 1] : uc(i, j, k) - mean[j], yT = top ? yc[j + 1] : 2 - yc[j];
+          const uB = bot ? uc(i, j - 1, k) - mean[j - 1] : -(uc(i, j, k) - mean[j]), yB = bot ? yc[j - 1] : -yc[j];
+          return (vc(ip[i], j, k) - vc(im[i], j, k)) / (2 * this.dx) - (uT - uB) / (yT - yB);
+        };
+    }
+  }
+  // plan: [k*Nx + i] at y index j; side: [j*Nx + i] at z index k; end: [j*Nz + k] at x index i
+  slices(field, si, sj, sk) {
+    const { Nx, Ny, Nz } = this, f = this.sampler(field);
+    const plan = new Float32Array(Nx * Nz), side = new Float32Array(Nx * Ny), end = new Float32Array(Nz * Ny);
+    for (let k = 0; k < Nz; k++) for (let i = 0; i < Nx; i++) plan[k * Nx + i] = f(i, sj, k);
+    for (let j = 0; j < Ny; j++) for (let i = 0; i < Nx; i++) side[j * Nx + i] = f(i, j, sk);
+    for (let j = 0; j < Ny; j++) for (let k = 0; k < Nz; k++) end[j * Nz + k] = f(si, j, k);
+    return { plan, side, end };
+  }
+  // Colour range: [0, max] for u, otherwise +-3 rms over y < 0.6
+  fieldRange(field) {
+    const { Nx, Ny, Nz } = this, f = this.sampler(field);
+    if (field === 0) {
+      let mx = 0;
+      for (let j = 0; j < Ny; j++) for (let k = 0; k < Nz; k += 2) for (let i = 0; i < Nx; i += 2) mx = Math.max(mx, f(i, j, k));
+      return [0, Math.max(0.5, Math.ceil(mx * 10) / 10)];
+    }
+    let ss = 0, c = 0;
+    for (let j = 0; j < Ny && this.yc[j] < 0.6; j++) for (let k = 0; k < Nz; k += 2) for (let i = 0; i < Nx; i += 2) { const a = f(i, j, k); ss += a * a; c++; }
+    const lim = Number((3 * Math.sqrt(ss / Math.max(c, 1)) || 0.1).toPrecision(2));
+    return [-lim, lim];
+  }
 }
+
 
 
 
@@ -995,7 +1116,8 @@ function updateDerived() {
   if (cells > MAX_CELLS) html += `<span class="warn">More than ${MAX_CELLS.toLocaleString("en")} cells needs too much memory for a phone. Reduce the grid.</span>`;
   else if (cells > 250000) html += `<span class="warn">Large grid: expect well under one step per second on a phone.</span>`;
   if (rt * p.Lz < 100) html += `<span class="warn">L<sub>z</sub>⁺ below about 100 is narrower than the minimal flow unit; turbulence may not sustain.</span>`;
-  if ((p.Nx & (p.Nx - 1)) || (p.Nz & (p.Nz - 1))) html += `<span class="warn" style="color:var(--muted)">N<sub>x</sub> or N<sub>z</sub> is not a power of two; the pressure solver falls back to a slower plain DFT.</span>`;
+  const smooth = (N) => { for (const q of [2, 3, 5]) while (N % q === 0) N /= q; return N === 1; };
+  if (!smooth(p.Nx) || !smooth(p.Nz)) html += `<span class="warn" style="color:var(--muted)">N<sub>x</sub> or N<sub>z</sub> has a prime factor other than 2, 3 or 5; the pressure solver falls back to a slower plain DFT.</span>`;
   el.innerHTML = html;
 }
 function saveForm() { try { const { raw } = readForm(); localStorage.setItem("ocdns-setup", JSON.stringify(raw)); } catch {} }
@@ -1035,62 +1157,85 @@ function buildLuts() {
   g.putImageData(img, 0, 0);
 }
 
+// ---------- solver backends ----------
+// JsBackend runs the JavaScript solver (double precision) inside the page and steps from the
+// animation loop. NativeBackend talks to the C++ solver (single precision, multithreaded) that the
+// Android app exposes as window.OCDNSNative; that solver steps on its own thread.
+const FIELD_CODE = { u: 0, up: 1, v: 2, w: 3, oz: 4 };
+class JsBackend {
+  constructor(p) { this.s = new OpenChannelDNS(p); this.blown = false; }
+  get label() { return "JavaScript · double"; }
+  grid() { const s = this.s; return { Nx: s.Nx, Ny: s.Ny, Nz: s.Nz, dx: s.dx, dz: s.dz, yc: s.yc, yf: s.yf }; }
+  setRunning() {}
+  tick(budgetMs) {
+    const t0 = performance.now();
+    do {
+      this.s.step();
+      if (!Number.isFinite(this.s.u[0])) { this.blown = true; break; }
+    } while (performance.now() - t0 < budgetMs);
+  }
+  state() { const s = this.s; return { t: s.t, dt: s.dt, nstep: s.nstep, reTau: s.reTau(), blown: this.blown }; }
+  slices(f, i, j, k) { return this.s.slices(FIELD_CODE[f], i, j, k); }
+  range(f) { return this.s.fieldRange(FIELD_CODE[f]); }
+  profiles() { return this.s.profiles(); }
+  history() { const h = this.s.history; return { t: h.map((q) => q.t), reTau: h.map((q) => q.reTau), tke: h.map((q) => q.tke) }; }
+  startAveragingNow() { this.s.startAveragingNow(); }
+  dispose() {}
+}
+function b64ToF32(b64) {
+  const s = atob(b64), u8 = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) u8[i] = s.charCodeAt(i);
+  return new Float32Array(u8.buffer);
+}
+class NativeBackend {
+  constructor(p) {
+    this.n = window.OCDNSNative;
+    this.n.init(JSON.stringify(p));
+    this.g = JSON.parse(this.n.grid());
+  }
+  get label() { return `C++ · single · ${this.g.threads} threads`; }
+  grid() { return this.g; }
+  setRunning(on) { this.n.setRunning(!!on); }
+  tick() {}
+  state() { return JSON.parse(this.n.state()); }
+  slices(f, i, j, k) {
+    const a = b64ToF32(this.n.slices(FIELD_CODE[f], i, j, k)), { Nx, Ny, Nz } = this.g;
+    return { plan: a.subarray(0, Nx * Nz), side: a.subarray(Nx * Nz, Nx * Nz + Nx * Ny), end: a.subarray(Nx * Nz + Nx * Ny) };
+  }
+  range(f) { return JSON.parse(this.n.range(FIELD_CODE[f])); }
+  profiles() { return JSON.parse(this.n.profiles()); }
+  history() { return JSON.parse(this.n.history()); }
+  startAveragingNow() { this.n.startAveragingNow(); }
+  dispose() { this.n.setRunning(false); }
+}
+const makeBackend = (p) => (window.OCDNSNative ? new NativeBackend(p) : new JsBackend(p));
+
 // ---------- simulation state ----------
-let sim = null, params = null, running = false, field = "u";
+let backend = null, G = null, params = null, running = false, field = "u", lastState = null;
 let sel = { i: 0, j: 0, k: 0 };   // slice indices: end view at x_i, side view at z_k, plan view at y_j
 let range = { lo: 0, hi: 1.3 }, rangeAge = 0;
-let stepsWindow = [], avgStarted = false, wakeLock = null;
+let stepsWindow = [], wakeLock = null;
 
 function start(p) {
   params = p;
-  sim = new OpenChannelDNS({ Re: p.Re, Lx: p.Lx, Lz: p.Lz, Nx: p.Nx, Ny: p.Ny, Nz: p.Nz, stretch: p.stretch, cfl: p.cfl, init: p.init, amp: p.amp, seed: p.seed });
-  avgStarted = false;
+  if (backend) backend.dispose();
+  backend = makeBackend({ Re: p.Re, Lx: p.Lx, Lz: p.Lz, Nx: p.Nx, Ny: p.Ny, Nz: p.Nz, stretch: p.stretch, cfl: p.cfl, init: p.init, amp: p.amp, seed: p.seed, tavg: p.tavg });
+  G = backend.grid(); lastState = backend.state(); stepsWindow = [];
+  backend.setRunning(running);
+  $("cEngine").textContent = backend.label;
   sel.i = Math.floor(p.Nx / 2); sel.k = Math.floor(p.Nz / 2);
   // plan view near y+ = 15 for the estimated Re_tau
   const yTarget = 15 / estReTau(p.Re);
-  let jb = 0; for (let j = 0; j < sim.Ny; j++) if (Math.abs(sim.yc[j] - yTarget) < Math.abs(sim.yc[jb] - yTarget)) jb = j;
+  let jb = 0; for (let j = 0; j < G.Ny; j++) if (Math.abs(G.yc[j] - yTarget) < Math.abs(G.yc[jb] - yTarget)) jb = j;
   sel.j = jb;
-  $("ySlider").max = String(sim.Ny - 1); $("ySlider").value = String(sel.j);
+  $("ySlider").max = String(G.Ny - 1); $("ySlider").value = String(sel.j);
   layoutViews(); rangeAge = 0; updateRange(); drawAll(); drawPlots(); updateStatus();
 }
 
-// ---------- field sampling at cell centres ----------
-function sampler() {
-  // All samplers take (i, j, k) = (x, y, z) cell indices.
-  const s = sim, { Nx, Ny, n, u, v, w, ip, im, kp, yc } = s;
-  const mean = new Float64Array(Ny);
-  if (field === "up" || field === "oz") for (let j = 0; j < Ny; j++) mean[j] = s.planeMean(u, j);
-  const uc = (i, j, k) => 0.5 * (u[i + Nx * k + n * j] + u[ip[i] + Nx * k + n * j]);
-  const wc = (i, j, k) => 0.5 * (w[i + Nx * k + n * j] + w[i + Nx * kp[k] + n * j]);
-  const vc = (i, j, k) => 0.5 * (v[i + Nx * k + n * j] + v[i + Nx * k + n * (j + 1)]);
-  switch (field) {
-    case "u": return uc;
-    case "up": return (i, j, k) => uc(i, j, k) - mean[j];
-    case "v": return vc;
-    case "w": return wc;
-    // fluctuating spanwise vorticity  omega_z' = dv'/dx - du'/dy, with u' = u - <u>(y)
-    // (<dv/dx> = 0 in a periodic box; ghosts: u = 0 at the wall, du/dy = 0 at the surface)
-    case "oz": return (i, j, k) => {
-      const top = j < Ny - 1, bot = j > 0;
-      const uT = top ? uc(i, j + 1, k) - mean[j + 1] : uc(i, j, k) - mean[j], yT = top ? yc[j + 1] : 2 - yc[j];
-      const uB = bot ? uc(i, j - 1, k) - mean[j - 1] : -(uc(i, j, k) - mean[j]), yB = bot ? yc[j - 1] : -yc[j];
-      return (vc(ip[i], j, k) - vc(im[i], j, k)) / (2 * s.dx) - (uT - uB) / (yT - yB);
-    };
-  }
-}
+// ---------- colour range ----------
 function updateRange() {
-  const s = sim, f = sampler(), { Nx, Ny, Nz } = s;
-  if (field === "u") {
-    let mx = 0; for (let j = 0; j < Ny; j += 1) for (let k = 0; k < Nz; k += 2) for (let i = 0; i < Nx; i += 2) mx = Math.max(mx, f(i, j, k));
-    range = { lo: 0, hi: Math.max(0.5, Math.ceil(mx * 10) / 10) };
-  } else {
-    // symmetric limit: 3 x rms over the region where it matters (y < 0.5)
-    let ss = 0, c = 0;
-    for (let j = 0; j < Ny && s.yc[j] < 0.6; j++) for (let k = 0; k < Nz; k += 2) for (let i = 0; i < Nx; i += 2) { const a = f(i, j, k); ss += a * a; c++; }
-    const lim = 3 * Math.sqrt(ss / Math.max(c, 1)) || 0.1;
-    const nice = Number(lim.toPrecision(2));
-    range = { lo: -nice, hi: nice };
-  }
+  const [lo, hi] = backend.range(field);
+  range = { lo, hi };
   const fmt = (x) => (Math.abs(x) >= 10 ? x.toFixed(0) : x.toFixed(2));
   $("cbMin").textContent = fmt(range.lo); $("cbMax").textContent = fmt(range.hi);
   $("cbMid").textContent = field === "u" ? "" : "0";
@@ -1114,13 +1259,13 @@ function layoutViews() {
   $("axPlanX").textContent = `x/h = ${f(Lx)}`; $("axSideX").textContent = `x/h ${f(Lx)}`; $("axEndZ").textContent = `z/h ${f(Lz)}`;
   // offscreen images: plan Nx x Nz; side/end use a y-row lookup for the stretched grid
   const H = 120;
-  views.plan.off.width = sim.Nx; views.plan.off.height = sim.Nz;
-  views.side.off.width = sim.Nx; views.side.off.height = H;
-  views.end.off.width = sim.Nz; views.end.off.height = H;
+  views.plan.off.width = G.Nx; views.plan.off.height = G.Nz;
+  views.side.off.width = G.Nx; views.side.off.height = H;
+  views.end.off.width = G.Nz; views.end.off.height = H;
   rowJ = new Int32Array(H);
   for (let r = 0; r < H; r++) {
     const y = 1 - (r + 0.5) / H; let j = 0;
-    while (j < sim.Ny - 1 && sim.yf[j + 1] <= y) j++;
+    while (j < G.Ny - 1 && G.yf[j + 1] <= y) j++;
     rowJ[r] = j;
   }
   resizeCanvases();
@@ -1157,28 +1302,28 @@ function guide(g, x0, y0, x1, y1) {
   g.setLineDash([6, 5]); g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); g.restore();
 }
 function drawAll() {
-  if (!sim) return;
-  const s = sim, f = sampler(), { Nx, Ny, Nz } = s, H = rowJ.length;
+  if (!backend) return;
+  const { Nx, Nz } = G, H = rowJ.length, sl = backend.slices(field, sel.i, sel.j, sel.k);
   // plan: canvas row 0 = top = z max
-  paint(views.plan.off, Nx, Nz, (c, r) => f(c, sel.j, Nz - 1 - r));
-  paint(views.side.off, Nx, H, (c, r) => f(c, rowJ[r], sel.k));
-  // end view: z runs horizontally, so the column is the spanwise index at fixed x
-  paint(views.end.off, Nz, H, (c, r) => f(sel.i, rowJ[r], c));
+  paint(views.plan.off, Nx, Nz, (c, r) => sl.plan[(Nz - 1 - r) * Nx + c]);
+  paint(views.side.off, Nx, H, (c, r) => sl.side[rowJ[r] * Nx + c]);
+  // end view: z runs horizontally, at fixed x
+  paint(views.end.off, Nz, H, (c, r) => sl.end[rowJ[r] * Nz + c]);
   for (const k in views) blit(views[k]);
   // slice guides
   const P = views.plan.c, S = views.side.c, E = views.end.c;
-  const xFrac = (sel.i + 0.5) / Nx, zFrac = (sel.k + 0.5) / Nz, yFrac = s.yc[sel.j];
+  const xFrac = (sel.i + 0.5) / Nx, zFrac = (sel.k + 0.5) / Nz, yFrac = G.yc[sel.j];
   guide(views.plan.g, xFrac * P.width, 0, xFrac * P.width, P.height);
   guide(views.plan.g, 0, (1 - zFrac) * P.height, P.width, (1 - zFrac) * P.height);
   guide(views.side.g, xFrac * S.width, 0, xFrac * S.width, S.height);
   guide(views.side.g, 0, (1 - yFrac) * S.height, S.width, (1 - yFrac) * S.height);
   guide(views.end.g, zFrac * E.width, 0, zFrac * E.width, E.height);
   guide(views.end.g, 0, (1 - yFrac) * E.height, E.width, (1 - yFrac) * E.height);
-  const rt = Math.max(s.reTau(), 1);
-  $("planY").textContent = `y⁺ ≈ ${(s.yc[sel.j] * rt).toFixed(1)} (y/h = ${s.yc[sel.j].toFixed(3)})`;
-  $("ySliderTxt").textContent = `y⁺ ${(s.yc[sel.j] * rt).toFixed(1)}`;
-  $("sideZ").textContent = `z/h = ${((sel.k + 0.5) * s.dz).toFixed(2)}`;
-  $("endX").textContent = `x/h = ${((sel.i + 0.5) * s.dx).toFixed(2)}`;
+  const rt = Math.max(lastState ? lastState.reTau : 1, 1);
+  $("planY").textContent = `y⁺ ≈ ${(G.yc[sel.j] * rt).toFixed(1)} (y/h = ${G.yc[sel.j].toFixed(3)})`;
+  $("ySliderTxt").textContent = `y⁺ ${(G.yc[sel.j] * rt).toFixed(1)}`;
+  $("sideZ").textContent = `z/h = ${((sel.k + 0.5) * G.dz).toFixed(2)}`;
+  $("endX").textContent = `x/h = ${((sel.i + 0.5) * G.dx).toFixed(2)}`;
 }
 function bindPointer(key, onPos) {
   const c = views[key].c;
@@ -1191,7 +1336,7 @@ function bindPointer(key, onPos) {
   c.addEventListener("pointerdown", (e) => { c.setPointerCapture(e.pointerId); h(e); });
   c.addEventListener("pointermove", h);
 }
-const yToJ = (y) => { let j = 0; while (j < sim.Ny - 1 && sim.yf[j + 1] <= y) j++; return j; };
+const yToJ = (y) => { let j = 0; while (j < G.Ny - 1 && G.yf[j + 1] <= y) j++; return j; };
 
 // ---------- line charts ----------
 function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
@@ -1266,25 +1411,9 @@ function bindHover(id) {
   c.addEventListener("pointerleave", () => { c._hover = null; const t = c.parentElement.querySelector(".tip"); if (t) t.hidden = true; drawPlots(); });
 }
 
-function profiles() {
-  const st = avgStarted ? sim.stats() : null;
-  if (st) return st;
-  // instantaneous plane averages, scaled by the instantaneous friction velocity
-  const s = sim, ut = Math.sqrt(Math.max(s.wallShear(), 1e-12)), out = { yp: [], Up: [], Wp: [], urms: [], vrms: [], wrms: [], uv: [], reTau: ut / s.nu };
-  const { Ny, n, u, v, w } = s;
-  for (let j = 0; j < Ny; j++) {
-    const o = n * j; let su = 0, sv = 0, sw = 0, suu = 0, svv = 0, sww = 0, suv = 0;
-    for (let m = 0; m < n; m++) { const a = u[o + m], b = 0.5 * (v[o + m] + v[o + n + m]), c = w[o + m]; su += a; sv += b; sw += c; suu += a * a; svv += b * b; sww += c * c; suv += a * b; }
-    su /= n; sv /= n; sw /= n;
-    out.yp.push(s.yc[j] * ut / s.nu); out.Up.push(su / ut); out.Wp.push(sw / ut);
-    out.urms.push(Math.sqrt(Math.max(suu / n - su * su, 0)) / ut); out.vrms.push(Math.sqrt(Math.max(svv / n - sv * sv, 0)) / ut);
-    out.wrms.push(Math.sqrt(Math.max(sww / n - sw * sw, 0)) / ut); out.uv.push(-(suv / n - su * sv) / (ut * ut));
-  }
-  return out;
-}
 function drawPlots() {
-  if (!sim) return;
-  const P = profiles(), x0 = Math.max(0.1, Math.pow(10, Math.floor(Math.log10(P.yp[0])))), x1 = Math.max(P.reTau * 1.05, 10);
+  if (!backend) return;
+  const P = backend.profiles(), x0 = Math.max(0.1, Math.pow(10, Math.floor(Math.log10(P.yp[0])))), x1 = Math.max(P.reTau * 1.05, 10);
   const yl = []; for (let k = 0; k <= 60; k++) { const y = x0 * Math.pow(x1 / x0, k / 60); yl.push(y); }
   const s1 = css("--s1"), s2 = css("--s2"), s3 = css("--s3"), s4 = css("--s4"), ref = css("--ref");
   const Umax = Math.max(...P.Up), Wmin = Math.min(0, ...P.Wp);
@@ -1305,9 +1434,9 @@ function drawPlots() {
       { x: P.yp, y: P.wrms, color: s3, label: "w′" }, { x: P.yp, y: P.uv, color: s4, label: "−u′v′" },
     ],
   });
-  const h = sim.history, ht = h.map((q) => q.t);
+  const h = backend.history(), ht = h.t;
   const tMax = Math.max(1, ht[ht.length - 1] || 1);
-  const rts = h.map((q) => q.reTau), ks = h.map((q) => q.tke);
+  const rts = h.reTau, ks = h.tke;
   const lim = (a) => { let lo = Infinity, hi = -Infinity; for (const x of a) { if (x < lo) lo = x; if (x > hi) hi = x; } return [lo, hi]; };
   const [r0, r1] = lim(rts.slice(Math.floor(rts.length * 0.05)));
   drawChart($("pRt"), { x0: 0, x1: tMax, y0: Math.floor(Math.max(0, r0 * 0.9) / 10) * 10, y1: Math.ceil((r1 * 1.05 + 1) / 10) * 10, xlabel: "t U_b/h", xname: "t", xdigits: 1,
@@ -1315,17 +1444,18 @@ function drawPlots() {
   const [, k1] = lim(ks);
   drawChart($("pK"), { x0: 0, x1: tMax, y0: 0, y1: Math.max(1e-3, k1 * 1.1), xlabel: "t U_b/h", xname: "t", xdigits: 1,
     series: [{ x: ht, y: ks, color: s1, label: "k", digits: 4, endDot: true }] });
-  $("avgTag").textContent = avgStarted ? `averaged over ${P.T.toFixed(0)} h/U_b` : "instantaneous";
-  $("avgInfo").textContent = avgStarted
+  $("avgTag").textContent = P.averaged ? `averaged over ${P.T.toFixed(0)} h/U_b` : "instantaneous";
+  $("avgInfo").textContent = P.averaged
     ? `Averaging since t = ${P.t0.toFixed(1)} (${P.T.toFixed(1)} h/U_b, Re_τ = ${P.reTau.toFixed(1)}).`
     : `Instantaneous plane averages. Averaging starts at t = ${params.tavg}.`;
 }
 
 // ---------- status + loop ----------
 function updateStatus() {
-  $("cT").textContent = sim.t.toFixed(1);
-  $("cRt").textContent = sim.reTau().toFixed(1);
-  $("cDt").textContent = sim.dt.toFixed(4);
+  const st = lastState || backend.state();
+  $("cT").textContent = st.t.toFixed(1);
+  $("cRt").textContent = st.reTau.toFixed(1);
+  $("cDt").textContent = st.dt.toFixed(4);
   const now = performance.now(); stepsWindow = stepsWindow.filter((q) => now - q[0] < 2000);
   const sps = stepsWindow.length > 1 ? (stepsWindow[stepsWindow.length - 1][1] - stepsWindow[0][1]) / ((now - stepsWindow[0][0]) / 1000) : 0;
   $("cSps").textContent = running ? sps.toFixed(0) : "–";
@@ -1334,14 +1464,11 @@ function updateStatus() {
 }
 let lastPlot = 0, lastStatus = 0, frame = 0;
 function loop() {
-  if (running && sim) {
-    const t0 = performance.now();
-    do {
-      sim.step();
-      if (!avgStarted && sim.t >= params.tavg) { sim.resetStats(); avgStarted = true; }
-      if (!Number.isFinite(sim.u[0])) { running = false; showErr("The solution blew up. Lower the CFL number or refine the grid, then restart."); break; }
-    } while (performance.now() - t0 < 22);
-    stepsWindow.push([performance.now(), sim.nstep]);
+  if (running && backend) {
+    backend.tick(22);
+    lastState = backend.state();
+    if (lastState.blown) { setRunning(false); showErr("The solution blew up. Lower the CFL number or refine the grid, then restart."); }
+    stepsWindow.push([performance.now(), lastState.nstep]);
     frame++;
     if (frame % 15 === 0) updateRange();
     drawAll();
@@ -1353,7 +1480,7 @@ function loop() {
 }
 function showErr(msg) { const e = $("formErr"); e.textContent = msg; e.hidden = !msg; }
 async function setRunning(on) {
-  running = on; updateStatus();
+  running = on; if (backend) backend.setRunning(on); updateStatus();
   try {
     if (on && "wakeLock" in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", () => (wakeLock = null)); }
     if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
@@ -1367,15 +1494,15 @@ function init() {
   buildLuts();
   const { p, bad } = readForm();
   start(Object.keys(bad).length ? Object.assign({}, p, { Re: 2000, Lx: Math.PI, Lz: Math.PI / 2, Nx: 32, Ny: 48, Nz: 32, stretch: 1.8, cfl: 1.2, tavg: 50, amp: 0.3, seed: 1 }) : p);
-  bindPointer("plan", (fx, fy) => { sel.i = Math.floor(fx * sim.Nx); sel.k = Math.floor((1 - fy) * sim.Nz); });
-  bindPointer("side", (fx, fy) => { sel.i = Math.floor(fx * sim.Nx); sel.j = yToJ(1 - fy); $("ySlider").value = sel.j; });
-  bindPointer("end", (fx, fy) => { sel.k = Math.floor(fx * sim.Nz); sel.j = yToJ(1 - fy); $("ySlider").value = sel.j; });
+  bindPointer("plan", (fx, fy) => { sel.i = Math.floor(fx * G.Nx); sel.k = Math.floor((1 - fy) * G.Nz); });
+  bindPointer("side", (fx, fy) => { sel.i = Math.floor(fx * G.Nx); sel.j = yToJ(1 - fy); $("ySlider").value = sel.j; });
+  bindPointer("end", (fx, fy) => { sel.k = Math.floor(fx * G.Nz); sel.j = yToJ(1 - fy); $("ySlider").value = sel.j; });
   $("ySlider").addEventListener("input", (e) => { sel.j = +e.target.value; drawAll(); });
   document.querySelectorAll('input[name="field"]').forEach((r) => r.addEventListener("change", () => { field = r.value; buildLuts(); updateRange(); drawAll(); }));
   for (const id of ["pRt", "pK", "pMean", "pRms"]) bindHover(id);
   $("runBtn").addEventListener("click", () => setRunning(!running));
   $("restartBtn").addEventListener("click", () => { showErr(""); start(params); });
-  $("resetAvg").addEventListener("click", () => { sim.resetStats(); avgStarted = true; drawPlots(); });
+  $("resetAvg").addEventListener("click", () => { backend.startAveragingNow(); drawPlots(); });
   $("setup").addEventListener("input", updateDerived);
   $("setup").addEventListener("submit", (e) => {
     e.preventDefault();
@@ -1395,7 +1522,7 @@ function init() {
   document.addEventListener("visibilitychange", async () => { if (!document.hidden && running && !wakeLock) setRunning(true); });
   requestAnimationFrame(loop);
 }
-if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (sim) { resizeCanvases(); drawAll(); drawPlots(); } });
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (backend) { resizeCanvases(); drawAll(); drawPlots(); } });
 init();
 })();
 </script>

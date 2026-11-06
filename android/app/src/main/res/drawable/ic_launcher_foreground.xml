@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Turbulent mean profile over a wall: a wall line, a log-like velocity profile and three streak lines. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- wall -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,74 L78,74 L78,78 L30,78 Z" />
+    <!-- streaks -->
+    <path
+        android:strokeColor="#9EC5F4"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M34,64 C44,60 52,68 62,64 S72,60 76,62" />
+    <path
+        android:strokeColor="#9EC5F4"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M34,52 C44,48 52,56 62,52 S72,48 76,50" />
+    <!-- mean velocity profile -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M34,74 C38,58 46,46 60,40 L74,34" />
+    <!-- free surface -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M30,32 L36,32 M40,32 L46,32 M50,32 L56,32 M60,32 L66,32 M70,32 L78,32" />
+</vector>

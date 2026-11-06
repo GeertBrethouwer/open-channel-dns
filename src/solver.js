@@ -39,7 +39,53 @@ class FFT1 {
         this.cs[i] = Math.cos((2 * Math.PI * i) / N);
         this.sn[i] = Math.sin((2 * Math.PI * i) / N);
       }
+      // mixed-radix plan when N = 2^a 3^b 5^c
+      const radices = [];
+      let r = N;
+      for (const p of [5, 3, 2]) while (r % p === 0) { radices.push(p); r /= p; }
+      this.smooth = r === 1;
+      if (this.smooth) {
+        this.stages = [];
+        let ncur = N;
+        for (const p of radices) {
+          const m = ncur / p, c = new Float64Array(m * p), s = new Float64Array(m * p);
+          for (let k = 0; k < m; k++) for (let t = 0; t < p; t++) {
+            c[k * p + t] = Math.cos((2 * Math.PI * k * t) / ncur);
+            s[k * p + t] = Math.sin((2 * Math.PI * k * t) / ncur);
+          }
+          const rc = new Float64Array(p), rs = new Float64Array(p);
+          for (let j = 0; j < p; j++) { rc[j] = Math.cos((2 * Math.PI * j) / p); rs[j] = Math.sin((2 * Math.PI * j) / p); }
+          this.stages.push({ p, m, c, s, rc, rs });
+          ncur = m;
+        }
+        this.ar = new Float64Array(5); this.ai = new Float64Array(5);
+      }
     }
+  }
+  // Self-sorting (Stockham) mixed-radix FFT for N = 2^a 3^b 5^c, using tr/ti as work arrays.
+  mixed(sign) {
+    let xr = this.re, xi = this.im, yr = this.tr, yi = this.ti, s = 1;
+    const ar = this.ar, ai = this.ai;
+    for (const st of this.stages) {
+      const { p, m, c, s: sn, rc, rs } = st;
+      for (let k = 0; k < m; k++) {
+        for (let q = 0; q < s; q++) {
+          for (let r = 0; r < p; r++) { const o = q + s * (k + r * m); ar[r] = xr[o]; ai[r] = xi[o]; }
+          for (let t = 0; t < p; t++) {
+            let sr = 0, si = 0;
+            for (let r = 0; r < p; r++) {
+              const j = (r * t) % p, wr = rc[j], wi = sign * rs[j];
+              sr += ar[r] * wr - ai[r] * wi; si += ar[r] * wi + ai[r] * wr;
+            }
+            const wr = c[k * p + t], wi = sign * sn[k * p + t], o = q + s * (p * k + t);
+            yr[o] = sr * wr - si * wi; yi[o] = sr * wi + si * wr;
+          }
+        }
+      }
+      let tmp = xr; xr = yr; yr = tmp; tmp = xi; xi = yi; yi = tmp;
+      s *= p;
+    }
+    if (xr !== this.re) { this.re.set(xr); this.im.set(xi); }
   }
   // In-place transform of this.re/this.im. sign = -1 forward, +1 inverse (unscaled).
   run(sign) {
@@ -66,6 +112,8 @@ class FFT1 {
           }
         }
       }
+    } else if (this.smooth) {
+      this.mixed(sign);
     } else {
       const tr = this.tr, ti = this.ti, cs = this.cs, sn = this.sn;
       for (let m = 0; m < N; m++) {
@@ -98,7 +146,7 @@ class OpenChannelDNS {
   constructor(opt) {
     const o = Object.assign({
       Re: 2000, Lx: Math.PI, Lz: Math.PI / 2, Nx: 32, Ny: 48, Nz: 32,
-      stretch: 1.8, cfl: 1.2, init: "turbulent", amp: 0.3, seed: 1,
+      stretch: 1.8, cfl: 1.2, init: "turbulent", amp: 0.3, seed: 1, tavg: 50,
     }, opt || {});
     this.opt = o;
     this.Re = o.Re; this.nu = 1 / o.Re;
@@ -570,6 +618,7 @@ class OpenChannelDNS {
     this.t += dt;
     this.nstep++;
     this.accumulate(dt);
+    if (!this.avgOn && this.t >= this.opt.tavg) { this.resetStats(); this.avgOn = true; }
     if (this.nstep % 5 === 0) this.record();
   }
 
@@ -657,6 +706,77 @@ class OpenChannelDNS {
     }
     return out;
   }
+
+  startAveragingNow() { this.resetStats(); this.avgOn = true; }
+
+  // Averaged statistics once averaging has started, otherwise instantaneous plane averages.
+  profiles() {
+    const st = this.avgOn ? this.stats() : null;
+    if (st) return Object.assign(st, { averaged: true });
+    const ut = Math.sqrt(Math.max(this.wallShear(), 1e-12));
+    const out = { averaged: false, T: 0, t0: 0, reTau: ut / this.nu, yp: [], Up: [], Wp: [], urms: [], vrms: [], wrms: [], uv: [] };
+    const { Ny, n, u, v, w } = this;
+    for (let j = 0; j < Ny; j++) {
+      const o = n * j; let su = 0, sv = 0, sw = 0, suu = 0, svv = 0, sww = 0, suv = 0;
+      for (let m = 0; m < n; m++) {
+        const a = u[o + m], b = 0.5 * (v[o + m] + v[o + n + m]), c = w[o + m];
+        su += a; sv += b; sw += c; suu += a * a; svv += b * b; sww += c * c; suv += a * b;
+      }
+      su /= n; sv /= n; sw /= n;
+      out.yp.push((this.yc[j] * ut) / this.nu); out.Up.push(su / ut); out.Wp.push(sw / ut);
+      out.urms.push(Math.sqrt(Math.max(suu / n - su * su, 0)) / ut);
+      out.vrms.push(Math.sqrt(Math.max(svv / n - sv * sv, 0)) / ut);
+      out.wrms.push(Math.sqrt(Math.max(sww / n - sw * sw, 0)) / ut);
+      out.uv.push(-(suv / n - su * sv) / (ut * ut));
+    }
+    return out;
+  }
+
+  // ---------- display fields (codes: 0 u, 1 u', 2 v, 3 w, 4 omega_z') ----------
+  sampler(field) {
+    const { Nx, Ny, n, u, v, w, ip, im, kp, yc } = this;
+    const mean = new Float64Array(Ny);
+    if (field === 1 || field === 4) for (let j = 0; j < Ny; j++) mean[j] = this.planeMean(u, j);
+    const uc = (i, j, k) => 0.5 * (u[i + Nx * k + n * j] + u[ip[i] + Nx * k + n * j]);
+    const wc = (i, j, k) => 0.5 * (w[i + Nx * k + n * j] + w[i + Nx * kp[k] + n * j]);
+    const vc = (i, j, k) => 0.5 * (v[i + Nx * k + n * j] + v[i + Nx * k + n * (j + 1)]);
+    switch (field) {
+      case 0: return uc;
+      case 1: return (i, j, k) => uc(i, j, k) - mean[j];
+      case 2: return vc;
+      case 3: return wc;
+      default: // fluctuating spanwise vorticity omega_z' = dv'/dx - du'/dy (u = 0 at the wall, du/dy = 0 at the surface)
+        return (i, j, k) => {
+          const top = j < Ny - 1, bot = j > 0;
+          const uT = top ? uc(i, j + 1, k) - mean[j + 1] : uc(i, j, k) - mean[j], yT = top ? yc[j + 1] : 2 - yc[j];
+          const uB = bot ? uc(i, j - 1, k) - mean[j - 1] : -(uc(i, j, k) - mean[j]), yB = bot ? yc[j - 1] : -yc[j];
+          return (vc(ip[i], j, k) - vc(im[i], j, k)) / (2 * this.dx) - (uT - uB) / (yT - yB);
+        };
+    }
+  }
+  // plan: [k*Nx + i] at y index j; side: [j*Nx + i] at z index k; end: [j*Nz + k] at x index i
+  slices(field, si, sj, sk) {
+    const { Nx, Ny, Nz } = this, f = this.sampler(field);
+    const plan = new Float32Array(Nx * Nz), side = new Float32Array(Nx * Ny), end = new Float32Array(Nz * Ny);
+    for (let k = 0; k < Nz; k++) for (let i = 0; i < Nx; i++) plan[k * Nx + i] = f(i, sj, k);
+    for (let j = 0; j < Ny; j++) for (let i = 0; i < Nx; i++) side[j * Nx + i] = f(i, j, sk);
+    for (let j = 0; j < Ny; j++) for (let k = 0; k < Nz; k++) end[j * Nz + k] = f(si, j, k);
+    return { plan, side, end };
+  }
+  // Colour range: [0, max] for u, otherwise +-3 rms over y < 0.6
+  fieldRange(field) {
+    const { Nx, Ny, Nz } = this, f = this.sampler(field);
+    if (field === 0) {
+      let mx = 0;
+      for (let j = 0; j < Ny; j++) for (let k = 0; k < Nz; k += 2) for (let i = 0; i < Nx; i += 2) mx = Math.max(mx, f(i, j, k));
+      return [0, Math.max(0.5, Math.ceil(mx * 10) / 10)];
+    }
+    let ss = 0, c = 0;
+    for (let j = 0; j < Ny && this.yc[j] < 0.6; j++) for (let k = 0; k < Nz; k += 2) for (let i = 0; i < Nx; i += 2) { const a = f(i, j, k); ss += a * a; c++; }
+    const lim = Number((3 * Math.sqrt(ss / Math.max(c, 1)) || 0.1).toPrecision(2));
+    return [-lim, lim];
+  }
 }
+
 
 if (typeof module !== "undefined") module.exports = { OpenChannelDNS, FFT1 };
