@@ -25,11 +25,18 @@ final class SolverBridge {
             p.getDouble("Re"), p.getDouble("Lx"), p.getDouble("Lz"),
             p.getInt("Nx"), p.getInt("Ny"), p.getInt("Nz"),
             p.getDouble("stretch"), p.getDouble("cfl"), p.getDouble("amp"),
-            p.optDouble("tavg", 50), "laminar".equals(p.optString("init")) ? 1 : 0, p.optInt("seed", 1)
+            p.optDouble("tavg", 50), "laminar".equals(p.optString("init")) ? 1 : 0, p.optInt("seed", 1),
+            Math.max(1, Math.min(p.optInt("threads", 4), cores()))
         };
         NativeSolver.create(a);
         created = true;
         apply();
+    }
+
+    /** Number of CPU cores the page may offer as thread counts. */
+    @JavascriptInterface
+    public int cores() {
+        return Runtime.getRuntime().availableProcessors();
     }
 
     @JavascriptInterface

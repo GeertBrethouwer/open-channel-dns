@@ -12,6 +12,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -34,7 +35,7 @@ constexpr double PI = 3.14159265358979323846;
 class Pool {
  public:
   explicit Pool(int n) : n_(std::max(1, n)) {
-    for (int t = 1; t < n_; ++t) workers_.emplace_back([this, t] { loop(t); });
+    for (int t = 1; t < n_; ++t) workers_.emplace_back([this] { loop(); });
   }
   ~Pool() {
     {
@@ -46,36 +47,46 @@ class Pool {
     for (auto& w : workers_) w.join();
   }
   int size() const { return n_; }
-  // Runs f(begin, end) on n chunks of [0, count) in parallel; returns when all are done.
+  // Runs f(begin, end) over [0, count) in parallel and returns when all of it is done.
+  // Work is shared dynamically: the range is cut into many small chunks that threads
+  // take from a shared counter, so fast cores simply process more chunks than slow ones
+  // (phones mix fast and slow cores).
   void run(int count, const std::function<void(int, int)>& f) {
     if (n_ == 1 || count < 2) {
       f(0, count);
       return;
     }
+    const int chunks = std::min(count, n_ * kChunksPerThread);
     {
       std::lock_guard<std::mutex> lk(m_);
       job_ = &f;
       count_ = count;
+      grain_ = (count + chunks - 1) / chunks;
+      next_.store(0, std::memory_order_relaxed);
       pending_ = n_ - 1;
       ++gen_;
     }
     cv_.notify_all();
-    chunk(0, f, count);
+    work(f, count, grain_);
     std::unique_lock<std::mutex> lk(m_);
     done_.wait(lk, [this] { return pending_ == 0; });
     job_ = nullptr;
   }
 
  private:
-  void chunk(int t, const std::function<void(int, int)>& f, int count) {
-    const int b = int((long long)count * t / n_), e = int((long long)count * (t + 1) / n_);
-    if (b < e) f(b, e);
+  static constexpr int kChunksPerThread = 6;
+  void work(const std::function<void(int, int)>& f, int count, int grain) {
+    for (;;) {
+      const int b = next_.fetch_add(grain, std::memory_order_relaxed);
+      if (b >= count) return;
+      f(b, std::min(count, b + grain));
+    }
   }
-  void loop(int t) {
+  void loop() {
     uint64_t seen = 0;
     for (;;) {
       const std::function<void(int, int)>* job;
-      int count;
+      int count, grain;
       {
         std::unique_lock<std::mutex> lk(m_);
         cv_.wait(lk, [&] { return gen_ != seen; });
@@ -83,8 +94,9 @@ class Pool {
         if (quit_) return;
         job = job_;
         count = count_;
+        grain = grain_;
       }
-      chunk(t, *job, count);
+      work(*job, count, grain);
       {
         std::lock_guard<std::mutex> lk(m_);
         if (--pending_ == 0) done_.notify_one();
@@ -96,7 +108,8 @@ class Pool {
   std::mutex m_;
   std::condition_variable cv_, done_;
   const std::function<void(int, int)>* job_ = nullptr;
-  int count_ = 0, pending_ = 0;
+  int count_ = 0, pending_ = 0, grain_ = 1;
+  std::atomic<int> next_{0};
   uint64_t gen_ = 0;
   bool quit_ = false;
 };
@@ -244,12 +257,12 @@ struct Rng {
 };
 
 struct Params {
-  double Re = 2000, Lx = PI, Lz = PI / 2;
-  int Nx = 32, Ny = 48, Nz = 32;
+  double Re = 3200, Lx = 4, Lz = 2;
+  int Nx = 64, Ny = 64, Nz = 64;
   double stretch = 1.8, cfl = 1.2, amp = 0.3, tavg = 50;
   bool laminar = false;
   uint32_t seed = 1;
-  int threads = 0;  // 0 = automatic
+  int threads = 0;  // 0 = default (4, or fewer if the device has fewer cores)
 };
 
 struct HistoryPoint {

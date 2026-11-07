@@ -248,20 +248,21 @@ details.about p { max-width: 65ch; margin: 8px 0 0; }
         <fieldset>
           <legend>Flow</legend>
           <div class="fields">
-            <div class="f"><label for="iRe">Re<sub>b</sub> = U<sub>b</sub>h/ν</label><input id="iRe" inputmode="decimal" value="2000"></div>
-            <div class="f"><label for="iLx">L<sub>x</sub>/h</label><input id="iLx" value="pi"></div>
-            <div class="f"><label for="iLz">L<sub>z</sub>/h</label><input id="iLz" value="pi/2"></div>
+            <div class="f"><label for="iRe">Re<sub>b</sub> = U<sub>b</sub>h/ν</label><input id="iRe" inputmode="decimal" value="3200"></div>
+            <div class="f"><label for="iLx">L<sub>x</sub>/h</label><input id="iLx" value="4"></div>
+            <div class="f"><label for="iLz">L<sub>z</sub>/h</label><input id="iLz" value="2"></div>
           </div>
         </fieldset>
         <fieldset>
           <legend>Grid</legend>
           <div class="fields">
-            <div class="f"><label for="iNx">N<sub>x</sub></label><input id="iNx" inputmode="numeric" value="32"></div>
-            <div class="f"><label for="iNy">N<sub>y</sub></label><input id="iNy" inputmode="numeric" value="48"></div>
-            <div class="f"><label for="iNz">N<sub>z</sub></label><input id="iNz" inputmode="numeric" value="32"></div>
+            <div class="f"><label for="iNx">N<sub>x</sub></label><input id="iNx" inputmode="numeric" value="64"></div>
+            <div class="f"><label for="iNy">N<sub>y</sub></label><input id="iNy" inputmode="numeric" value="64"></div>
+            <div class="f"><label for="iNz">N<sub>z</sub></label><input id="iNz" inputmode="numeric" value="64"></div>
             <div class="f"><label for="iSt">y-stretching γ</label><input id="iSt" inputmode="decimal" value="1.8"></div>
             <div class="f"><label for="iCfl">CFL</label><input id="iCfl" inputmode="decimal" value="1.2"></div>
             <div class="f"><label for="iTavg">Average from t</label><input id="iTavg" inputmode="decimal" value="50"></div>
+            <div class="f" id="fThreads" hidden><label for="iThreads">CPU threads</label><select id="iThreads"><option value="4">4</option></select></div>
           </div>
         </fieldset>
         <fieldset>
@@ -288,7 +289,7 @@ details.about p { max-width: 65ch; margin: 8px 0 0; }
         <p>Incompressible Navier–Stokes in a box periodic in x and z, with a no-slip wall at y = 0 and a free-slip, rigid-lid surface at y = h (∂u/∂y = ∂w/∂y = 0, v = 0). Lengths are scaled by h and velocities by the bulk velocity U<sub>b</sub>, so ν = 1/Re<sub>b</sub>.</p>
         <p>Second-order central differences on a staggered (MAC) grid, with the convective terms in divergence form. The grid is uniform in x and z and clustered at the wall with a tanh mapping in y; the surface end is left coarse.</p>
         <p>Time stepping uses the low-storage three-stage Runge–Kutta scheme of Wray for convection and the x–z viscous terms, and Crank–Nicolson for the wall-normal viscous term. Each stage ends with a projection: the pressure Poisson equation is solved exactly with FFTs in x and z (modified wavenumbers) and a tridiagonal solve in y. After every stage a uniform streamwise pressure gradient restores U<sub>b</sub> = 1, so the mass flux stays constant. There is no mean spanwise pressure gradient; the initial field has no mean spanwise flow, and any mean spanwise flow that develops in a small box is left free and averages out over long times. Δt follows the CFL number you set.</p>
-        <p>The initial field is a mean profile plus a few divergence-free large-scale modes (streamwise and spanwise wavelengths of the box size and its halves and thirds) with a little noise. Re<sub>τ</sub> is taken from the mean wall shear. The default box (π × π/2 at Re<sub>b</sub> = 2000, Re<sub>τ</sub> ≈ 130) is just above the minimal flow unit, and Δx⁺ ≈ 13 and Δz⁺ ≈ 6.5 are coarse for a second-order scheme, so treat the statistics as indicative.</p>
+        <p>The initial field is a mean profile plus a few divergence-free large-scale modes (streamwise and spanwise wavelengths of the box size and its halves and thirds) with a little noise. Re<sub>τ</sub> is taken from the mean wall shear. The default case (Re<sub>b</sub> = 3200, Re<sub>τ</sub> ≈ 200, a 4h × 2h box on a 64 × 64 × 64 grid) has Δx⁺ ≈ 13 and Δz⁺ ≈ 6, which is coarse for a second-order scheme, so treat the statistics as indicative.</p>
       </details>
     </section>
   </div>
@@ -442,7 +443,7 @@ function mulberry32(seed) {
 class OpenChannelDNS {
   constructor(opt) {
     const o = Object.assign({
-      Re: 2000, Lx: Math.PI, Lz: Math.PI / 2, Nx: 32, Ny: 48, Nz: 32,
+      Re: 3200, Lx: 4, Lz: 2, Nx: 64, Ny: 64, Nz: 64,
       stretch: 1.8, cfl: 1.2, init: "turbulent", amp: 0.3, seed: 1, tavg: 50,
     }, opt || {});
     this.opt = o;
@@ -1083,9 +1084,25 @@ class OpenChannelDNS {
 "use strict";
 (() => {
 const $ = (id) => document.getElementById(id);
-const DEFAULTS = { Re: "2000", Lx: "pi", Lz: "pi/2", Nx: "32", Ny: "48", Nz: "32", stretch: "1.8", cfl: "1.2", tavg: "50", init: "turbulent", amp: "0.3", seed: "1" };
-const FORM = { Re: "iRe", Lx: "iLx", Lz: "iLz", Nx: "iNx", Ny: "iNy", Nz: "iNz", stretch: "iSt", cfl: "iCfl", tavg: "iTavg", init: "iInit", amp: "iAmp", seed: "iSeed" };
-const MAX_CELLS = 1.0e6;
+const DEFAULTS = { Re: "3200", Lx: "4", Lz: "2", Nx: "64", Ny: "64", Nz: "64", stretch: "1.8", cfl: "1.2", tavg: "50", threads: "4", init: "turbulent", amp: "0.3", seed: "1" };
+const FORM = { Re: "iRe", Lx: "iLx", Lz: "iLz", Nx: "iNx", Ny: "iNy", Nz: "iNz", stretch: "iSt", cfl: "iCfl", tavg: "iTavg", threads: "iThreads", init: "iInit", amp: "iAmp", seed: "iSeed" };
+const STORE_KEY = "ocdns-setup-v2";  // v2: new default case (Re_b 3200, 64 x 64 x 64)
+// In the Android app the C++ solver can use several CPU threads; offer 1 .. number of cores.
+const NATIVE = !!window.OCDNSNative;
+function setupThreadsField() {
+  if (!NATIVE) return;
+  let cores = 4;
+  try { cores = Math.max(1, Math.min(16, parseInt(window.OCDNSNative.cores(), 10) || 4)); } catch {}
+  const sel = $("iThreads");
+  sel.innerHTML = "";
+  for (let t = 1; t <= Math.max(cores, 4); t++) {
+    const o = document.createElement("option");
+    o.value = String(t); o.textContent = t === 4 ? "4 (default)" : String(t) + (t === cores ? " (all cores)" : "");
+    sel.appendChild(o);
+  }
+  $("fThreads").hidden = false;
+}
+const MAX_CELLS = 2.4e6;
 
 // ---------- form handling ----------
 function parseLen(s) {
@@ -1099,7 +1116,7 @@ function readForm() {
     Re: parseFloat(raw.Re), Lx: parseLen(raw.Lx), Lz: parseLen(raw.Lz),
     Nx: parseInt(raw.Nx, 10), Ny: parseInt(raw.Ny, 10), Nz: parseInt(raw.Nz, 10),
     stretch: parseFloat(raw.stretch), cfl: parseFloat(raw.cfl), tavg: parseFloat(raw.tavg),
-    init: raw.init, amp: parseFloat(raw.amp), seed: parseInt(raw.seed, 10),
+    init: raw.init, amp: parseFloat(raw.amp), seed: parseInt(raw.seed, 10), threads: parseInt(raw.threads, 10) || 4,
   };
   const bad = {};
   const chk = (k, ok) => { if (!ok) bad[k] = true; };
@@ -1107,7 +1124,7 @@ function readForm() {
   chk("Lx", p.Lx > 0.05 && p.Lx <= 100); chk("Lz", p.Lz > 0.05 && p.Lz <= 100);
   chk("Nx", p.Nx >= 4 && p.Nx <= 512); chk("Ny", p.Ny >= 4 && p.Ny <= 512); chk("Nz", p.Nz >= 4 && p.Nz <= 512);
   chk("stretch", p.stretch >= 0 && p.stretch <= 4); chk("cfl", p.cfl > 0 && p.cfl <= 1.7);
-  chk("tavg", p.tavg >= 0); chk("amp", p.amp >= 0 && p.amp <= 2); chk("seed", Number.isFinite(p.seed));
+  chk("tavg", p.tavg >= 0); chk("amp", p.amp >= 0 && p.amp <= 2); chk("seed", Number.isFinite(p.seed)); chk("threads", p.threads >= 1 && p.threads <= 16);
   for (const k in FORM) $(FORM[k]).setAttribute("aria-invalid", bad[k] ? "true" : "false");
   return { p, raw, bad };
 }
@@ -1125,16 +1142,20 @@ function updateDerived() {
     <span>Δx⁺ <b>${f(rt * p.Lx / p.Nx)}</b></span><span>Δz⁺ <b>${f(rt * p.Lz / p.Nz)}</b></span>
     <span>Δy⁺ wall <b>${f(rt * dyw, 2)}</b></span><span>Δy⁺ surface <b>${f(rt * dys)}</b></span>
     <span>L<sub>x</sub>⁺ <b>${f(rt * p.Lx, 0)}</b></span><span>L<sub>z</sub>⁺ <b>${f(rt * p.Lz, 0)}</b></span>`;
-  if (cells > MAX_CELLS) html += `<span class="warn">More than ${MAX_CELLS.toLocaleString("en")} cells needs too much memory for a phone. Reduce the grid.</span>`;
-  else if (cells > 250000) html += `<span class="warn">Large grid: expect well under one step per second on a phone.</span>`;
+  // memory: ~70 bytes per cell in the app (single precision), ~140 on the website (double)
+  const mb = Math.round(cells * (NATIVE ? 70 : 140) / 1e6);
+  html += `<span>memory <b>≈ ${mb} MB</b></span><span></span>`;
+  if (cells > MAX_CELLS) html += `<span class="warn">The limit is ${MAX_CELLS.toLocaleString("en")} cells. Reduce the grid.</span>`;
+  else if (!NATIVE && mb > 150) html += `<span class="warn">A phone browser may close the page for lack of memory at this size; the Android app needs half as much.</span>`;
+  else if (cells > 400000) html += `<span class="warn">Large grid: expect only a few steps per second on a phone${NATIVE ? "" : ", and fewer on the website"}.</span>`;
   if (rt * p.Lz < 100) html += `<span class="warn">L<sub>z</sub>⁺ below about 100 is narrower than the minimal flow unit; turbulence may not sustain.</span>`;
   const smooth = (N) => { for (const q of [2, 3, 5]) while (N % q === 0) N /= q; return N === 1; };
   if (!smooth(p.Nx) || !smooth(p.Nz)) html += `<span class="warn" style="color:var(--muted)">N<sub>x</sub> or N<sub>z</sub> has a prime factor other than 2, 3 or 5; the pressure solver falls back to a slower plain DFT.</span>`;
   el.innerHTML = html;
 }
-function saveForm() { try { const { raw } = readForm(); localStorage.setItem("ocdns-setup", JSON.stringify(raw)); } catch {} }
+function saveForm() { try { const { raw } = readForm(); localStorage.setItem(STORE_KEY, JSON.stringify(raw)); } catch {} }
 function loadForm() {
-  let raw = null; try { raw = JSON.parse(localStorage.getItem("ocdns-setup") || "null"); } catch {}
+  let raw = null; try { raw = JSON.parse(localStorage.getItem(STORE_KEY) || "null"); } catch {}
   const src = Object.assign({}, DEFAULTS, raw || {});
   for (const k in FORM) $(FORM[k]).value = src[k];
 }
@@ -1231,7 +1252,7 @@ let stepsWindow = [], wakeLock = null;
 function start(p) {
   params = p;
   if (backend) backend.dispose();
-  backend = makeBackend({ Re: p.Re, Lx: p.Lx, Lz: p.Lz, Nx: p.Nx, Ny: p.Ny, Nz: p.Nz, stretch: p.stretch, cfl: p.cfl, init: p.init, amp: p.amp, seed: p.seed, tavg: p.tavg });
+  backend = makeBackend({ Re: p.Re, Lx: p.Lx, Lz: p.Lz, Nx: p.Nx, Ny: p.Ny, Nz: p.Nz, stretch: p.stretch, cfl: p.cfl, init: p.init, amp: p.amp, seed: p.seed, tavg: p.tavg, threads: p.threads });
   G = backend.grid(); lastState = backend.state(); stepsWindow = [];
   backend.setRunning(running);
   $("cEngine").textContent = backend.label;
@@ -1502,10 +1523,10 @@ async function setRunning(on) {
 // ---------- wiring ----------
 function init() {
   setupView("plan", "cPlan", "framePlan"); setupView("side", "cSide", "frameSide"); setupView("end", "cEnd", "frameEnd");
-  loadForm(); updateDerived();
+  setupThreadsField(); loadForm(); updateDerived();
   buildLuts();
   const { p, bad } = readForm();
-  start(Object.keys(bad).length ? Object.assign({}, p, { Re: 2000, Lx: Math.PI, Lz: Math.PI / 2, Nx: 32, Ny: 48, Nz: 32, stretch: 1.8, cfl: 1.2, tavg: 50, amp: 0.3, seed: 1 }) : p);
+  start(Object.keys(bad).length ? Object.assign({}, p, { Re: 3200, Lx: 4, Lz: 2, Nx: 64, Ny: 64, Nz: 64, stretch: 1.8, cfl: 1.2, tavg: 50, amp: 0.3, seed: 1, threads: 4 }) : p);
   bindPointer("plan", (fx, fy) => { sel.i = Math.floor(fx * G.Nx); sel.k = Math.floor((1 - fy) * G.Nz); });
   bindPointer("side", (fx, fy) => { sel.i = Math.floor(fx * G.Nx); sel.j = yToJ(1 - fy); $("ySlider").value = sel.j; });
   bindPointer("end", (fx, fy) => { sel.k = Math.floor(fx * G.Nz); sel.j = yToJ(1 - fy); $("ySlider").value = sel.j; });

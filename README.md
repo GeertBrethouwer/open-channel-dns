@@ -14,7 +14,7 @@ An interactive direct numerical simulation (DNS) of turbulent open channel flow 
 - **Pressure:** a fractional-step projection at every stage. The Poisson equation is solved exactly with FFTs in x and z (modified wavenumbers) and a tridiagonal solve in y, which keeps the discrete divergence at round-off level. The FFT is radix-2 for powers of two and a self-sorting mixed-radix (Stockham) transform for N = 2^a 3^b 5^c; other sizes fall back to a plain DFT.
 - **Initial condition:** a turbulent (1/7 power law) or laminar mean profile, plus large-scale divergence-free modes and weak noise.
 
-The default case is Re_b = 2000 (Re_τ ≈ 130) in a π h × π/2 h box on a 32 × 48 × 32 grid. It sustains turbulence and runs at roughly 15–20 time steps per second in a desktop browser. The resolution is coarse for a second-order scheme, so treat the statistics as indicative.
+The default case is Re_b = 3200 (Re_τ ≈ 200) in a 4h × 2h box on a 64 × 64 × 64 grid (Δx⁺ ≈ 13, Δz⁺ ≈ 6). The resolution is coarse for a second-order scheme, so treat the statistics as indicative. Smaller grids run much faster, especially in the browser.
 
 ## Two solvers, one page
 
@@ -22,7 +22,7 @@ The default case is Re_b = 2000 (Re_τ ≈ 130) in a π h × π/2 h box on a 32 
 |---|---|---|
 | Solver | `src/solver.js`, JavaScript | `native/ocdns.hpp`, C++17 |
 | Precision | double | single (`float` fields; sums and statistics in double). Compile with `-DOCDNS_DOUBLE` for double. |
-| Threads | 1 | up to 4 |
+| Threads | 1 | 4 by default, up to the number of cores (setting in the app); work is shared dynamically, so fast and slow phone cores both contribute |
 | Runs | in the page's animation loop | on its own thread; the page fetches slices and statistics |
 
 Both solvers implement the same algorithm and start from the same random field. In double precision they agree to at least 10 digits after 20 time steps. The page (`src/app.html`) talks to whichever solver is present: inside the Android app the WebView provides `window.OCDNSNative`, otherwise the JavaScript solver is used. The engine chip in the header shows which one runs.

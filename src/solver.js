@@ -145,7 +145,7 @@ function mulberry32(seed) {
 class OpenChannelDNS {
   constructor(opt) {
     const o = Object.assign({
-      Re: 2000, Lx: Math.PI, Lz: Math.PI / 2, Nx: 32, Ny: 48, Nz: 32,
+      Re: 3200, Lx: 4, Lz: 2, Nx: 64, Ny: 64, Nz: 64,
       stretch: 1.8, cfl: 1.2, init: "turbulent", amp: 0.3, seed: 1, tavg: 50,
     }, opt || {});
     this.opt = o;

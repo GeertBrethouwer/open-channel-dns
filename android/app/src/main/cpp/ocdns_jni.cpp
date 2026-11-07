@@ -78,13 +78,14 @@ jdoubleArray toJava(JNIEnv* env, const std::vector<double>& v) {
 extern "C" {
 
 JNIEXPORT void JNICALL JNI_FN(create)(JNIEnv* env, jclass, jdoubleArray params) {
-  std::vector<double> a(12);
-  env->GetDoubleArrayRegion(params, 0, 12, a.data());
+  std::vector<double> a(13, 0.0);
+  env->GetDoubleArrayRegion(params, 0, std::min<jsize>(13, env->GetArrayLength(params)), a.data());
   ocdns::Params p;
   p.Re = a[0]; p.Lx = a[1]; p.Lz = a[2];
   p.Nx = int(a[3]); p.Ny = int(a[4]); p.Nz = int(a[5]);
   p.stretch = a[6]; p.cfl = a[7]; p.amp = a[8]; p.tavg = a[9];
   p.laminar = a[10] != 0; p.seed = uint32_t(a[11]);
+  p.threads = int(a[12]);  // 0 = default
   std::lock_guard<std::mutex> lk(g_life);
   g_runner.reset();
   g_runner = std::make_unique<Runner>(p);

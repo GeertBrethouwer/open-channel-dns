@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Icon preview</title>
+<!-- Same paths as android/app/src/main/res/drawable/ic_launcher_foreground.xml, for previewing on a desktop. -->
+<style>body{margin:0;padding:24px;display:flex;gap:24px;align-items:center;background:#eef1f4}svg{border-radius:50%}</style>
+<svg id="big" width="216" height="216" viewBox="18 18 72 72"></svg>
+<svg id="small" width="48" height="48" viewBox="18 18 72 72"></svg>
+<script>
+const art = `
+<rect x="0" y="0" width="108" height="108" fill="#1C5CAB"/>
+<g fill="none" stroke-linecap="round" stroke-linejoin="round">
+<path stroke="#9EC5F4" stroke-width="2.6" d="M46,58 a2,2 0 0,1 4,0 a4,4 0 0,1 -8,0 a6,6 0 0,1 12,0 a8,8 0 0,1 -16,0"/>
+<path stroke="#9EC5F4" stroke-width="2.6" d="M56,44 a1.5,1.5 0 0,0 -3,0 a3,3 0 0,0 6,0 a4.5,4.5 0 0,0 -9,0 a6,6 0 0,0 12,0"/>
+<path stroke="#FFFFFF" stroke-width="1.6" d="M34,74 L34,32"/>
+<path stroke="#FFFFFF" stroke-width="4" d="M34,74 L42.2,73.6 L48,72 L51.6,70 L58,64 L64.2,54 L68.5,44 L72,34"/>
+<path stroke="#FFFFFF" stroke-width="2" d="M30,32 L36,32 M40,32 L46,32 M50,32 L56,32 M60,32 L66,32 M70,32 L78,32"/>
+</g>
+<path fill="#FFFFFF" d="M30,74 L78,74 L78,78 L30,78 Z"/>`;
+document.getElementById("big").innerHTML = art;
+document.getElementById("small").innerHTML = art;
+</script>

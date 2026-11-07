@@ -8,7 +8,7 @@ final class NativeSolver {
 
     private NativeSolver() {}
 
-    /** params: Re, Lx, Lz, Nx, Ny, Nz, stretch, cfl, amp, tavg, laminar (0/1), seed */
+    /** params: Re, Lx, Lz, Nx, Ny, Nz, stretch, cfl, amp, tavg, laminar (0/1), seed, threads */
     static native void create(double[] params);
 
     static native void destroy();
