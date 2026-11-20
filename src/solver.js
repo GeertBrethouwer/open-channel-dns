@@ -3,8 +3,11 @@
  * Open channel flow DNS: no-slip wall at y=0, free-slip surface at y=h=1.
  * Periodic in x (streamwise) and z (spanwise).
  * Second-order finite differences on a staggered (MAC) grid, stretched in y.
- * Time integration: low-storage RK3 (Wray) for convection and x/z diffusion,
- * Crank-Nicolson for wall-normal diffusion, fractional-step projection per substage.
+ * Time integration: low-storage third-order Runge-Kutta for convection and x/z diffusion,
+ * either the four-stage scheme of the SIMSON user guide (default, rk: 4) or Wray's three-stage scheme
+ * (rk: 3), Crank-Nicolson for wall-normal diffusion. In the default case the four-stage scheme runs
+ * up to CFL ~3.8 (|u|/dx + |v|/dy + |w|/dz), the three-stage scheme up to ~3.0;
+ * fractional-step projection per substage.
  * Pressure Poisson: FFT in x and z (modified wavenumbers) + tridiagonal solve in y.
  * Constant mass flux: bulk velocity U_b = 1 enforced after every substage.
  * Units: h = 1, U_b = 1, nu = 1/Re_b.
@@ -146,7 +149,7 @@ class OpenChannelDNS {
   constructor(opt) {
     const o = Object.assign({
       Re: 3200, Lx: 4, Lz: 2, Nx: 64, Ny: 64, Nz: 64,
-      stretch: 1.8, cfl: 1.2, init: "turbulent", amp: 0.3, seed: 1, tavg: 50,
+      stretch: 1.8, cfl: 2.5, rk: 4, init: "turbulent", amp: 0.3, seed: 1, tavg: 50,
     }, opt || {});
     this.opt = o;
     this.Re = o.Re; this.nu = 1 / o.Re;
@@ -202,10 +205,20 @@ class OpenChannelDNS {
     // implicit-diffusion scratch
     this.tcp = new Float64Array(Ny + 1); this.tden = new Float64Array(Ny + 1);
 
-    // RK3 (Wray) coefficients
-    this.G = [8 / 15, 5 / 12, 3 / 4];
-    this.Z = [0, -17 / 60, -5 / 12];
-    this.A = [8 / 15, 2 / 15, 1 / 3];
+    // low-storage RK3 coefficients: G (new RHS), Z (previous RHS), A = G + Z (stage weight, also of the
+    // Crank-Nicolson term), C = stage start times / dt
+    if (o.rk === 3) { // Wray
+      this.G = [8 / 15, 5 / 12, 3 / 4];
+      this.Z = [0, -17 / 60, -5 / 12];
+      this.A = [8 / 15, 2 / 15, 1 / 3];
+    } else if (o.rk === 4) { // four stages, SIMSON user guide (Table 5.1): amplification polynomial of RK4
+      this.G = [8 / 17, 17 / 60, 5 / 12, 3 / 4];
+      this.Z = [0, -15 / 68, -17 / 60, -5 / 12];
+      this.A = [8 / 17, 16 / 255, 2 / 15, 1 / 3];
+    } else throw new Error("rk must be 3 or 4");
+    this.C = [0];
+    for (let s = 1; s < this.A.length; s++) this.C.push(this.C[s - 1] + this.A[s - 1]);
+    this.forcing = null; // optional f(t, solver) adding a body force into Hu, Hv, Hw (manufactured solutions)
 
     this.t = 0; this.nstep = 0; this.dt = 0;
     this.dtVisc = 2.0 / (4 * this.nu * (1 / (this.dx * this.dx) + 1 / (this.dz * this.dz)));
@@ -589,13 +602,16 @@ class OpenChannelDNS {
     return dt;
   }
 
-  step() {
-    const dt = this.computeDt(false);
+  // One time step; dtFixed (optional) replaces the CFL-based time step.
+  step(dtFixed) {
+    let dt;
+    if (dtFixed > 0) { this.computeDt(false); dt = this.dt = dtFixed; } else dt = this.computeDt(false);
     this._idx = 1 / this.dx; this._idz = 1 / this.dz;
     let dp = 0;
-    for (let s = 0; s < 3; s++) {
+    for (let s = 0; s < this.A.length; s++) {
       const g = this.G[s], z = this.Z[s], a = this.A[s];
       this.computeRHS();
+      if (this.forcing) this.forcing(this.t + this.C[s] * dt, this);
       const { u, v, w, Hu, Hv, Hw, Hu1, Hv1, Hw1, du, dv, dw } = this;
       for (let I = 0; I < u.length; I++) {
         du[I] = dt * (g * Hu[I] + z * Hu1[I] + a * du[I]);

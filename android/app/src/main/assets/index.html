@@ -257,7 +257,7 @@ details.about p { max-width: 65ch; margin: 8px 0 0; }
             <div class="f"><label for="iNy">N<sub>y</sub></label><input id="iNy" inputmode="numeric" value="64"></div>
             <div class="f"><label for="iNz">N<sub>z</sub></label><input id="iNz" inputmode="numeric" value="64"></div>
             <div class="f"><label for="iSt">y-stretching γ</label><input id="iSt" inputmode="decimal" value="1.8"></div>
-            <div class="f"><label for="iCfl">CFL</label><input id="iCfl" inputmode="decimal" value="1.2"></div>
+            <div class="f"><label for="iCfl">CFL</label><input id="iCfl" inputmode="decimal" value="2.5"></div>
             <div class="f"><label for="iTavg">Average from t</label><input id="iTavg" inputmode="decimal" value="50"></div>
             <div class="f" id="fThreads" hidden><label for="iThreads">CPU threads</label><select id="iThreads"><option value="4">4</option></select></div>
           </div>
@@ -285,7 +285,7 @@ details.about p { max-width: 65ch; margin: 8px 0 0; }
         <summary>About the numerics</summary>
         <p>Incompressible Navier–Stokes in a box periodic in x and z, with a no-slip wall at y = 0 and a free-slip, rigid-lid surface at y = h (∂u/∂y = ∂w/∂y = 0, v = 0). Lengths are scaled by h and velocities by the bulk velocity U<sub>b</sub>, so ν = 1/Re<sub>b</sub>.</p>
         <p>Second-order central differences on a staggered (MAC) grid, with the convective terms in divergence form. The grid is uniform in x and z and clustered at the wall with a tanh mapping in y; the surface end is left coarse.</p>
-        <p>Time stepping uses the low-storage three-stage Runge–Kutta scheme of Wray for convection and the x–z viscous terms, and Crank–Nicolson for the wall-normal viscous term. Each stage ends with a projection: the pressure Poisson equation is solved exactly with FFTs in x and z (modified wavenumbers) and a tridiagonal solve in y. After every stage a uniform streamwise pressure gradient restores U<sub>b</sub> = 1, so the mass flux stays constant. There is no mean spanwise pressure gradient; the initial field has no mean spanwise flow, and any mean spanwise flow that develops in a small box is left free and averages out over long times. Δt follows the CFL number you set.</p>
+        <p>Time stepping uses a low-storage four-stage, third-order Runge–Kutta scheme (from the SIMSON user guide) for convection and the x–z viscous terms, and Crank–Nicolson for the wall-normal viscous term. At large time steps its time error is several times smaller than that of the three-stage scheme of Wray, and it stays stable up to CFL ≈ 3.8 (Wray: ≈ 3.0). Each stage ends with a projection: the pressure Poisson equation is solved exactly with FFTs in x and z (modified wavenumbers) and a tridiagonal solve in y. After every stage a uniform streamwise pressure gradient restores U<sub>b</sub> = 1, so the mass flux stays constant. There is no mean spanwise pressure gradient; the initial field has no mean spanwise flow, and any mean spanwise flow that develops in a small box is left free and averages out over long times. Δt follows the CFL number you set.</p>
         <p>The initial field is a mean profile plus a few divergence-free large-scale modes (streamwise and spanwise wavelengths of the box size and its halves and thirds) with a little noise. Re<sub>τ</sub> is taken from the mean wall shear. The default case (Re<sub>b</sub> = 3200, Re<sub>τ</sub> ≈ 200, a 4h × 2h box on a 64 × 64 × 64 grid) has Δx⁺ ≈ 13 and Δz⁺ ≈ 6, which is coarse for a second-order scheme, so treat the statistics as indicative.</p>
       </details>
     </section>
@@ -298,8 +298,11 @@ details.about p { max-width: 65ch; margin: 8px 0 0; }
  * Open channel flow DNS: no-slip wall at y=0, free-slip surface at y=h=1.
  * Periodic in x (streamwise) and z (spanwise).
  * Second-order finite differences on a staggered (MAC) grid, stretched in y.
- * Time integration: low-storage RK3 (Wray) for convection and x/z diffusion,
- * Crank-Nicolson for wall-normal diffusion, fractional-step projection per substage.
+ * Time integration: low-storage third-order Runge-Kutta for convection and x/z diffusion,
+ * either the four-stage scheme of the SIMSON user guide (default, rk: 4) or Wray's three-stage scheme
+ * (rk: 3), Crank-Nicolson for wall-normal diffusion. In the default case the four-stage scheme runs
+ * up to CFL ~3.8 (|u|/dx + |v|/dy + |w|/dz), the three-stage scheme up to ~3.0;
+ * fractional-step projection per substage.
  * Pressure Poisson: FFT in x and z (modified wavenumbers) + tridiagonal solve in y.
  * Constant mass flux: bulk velocity U_b = 1 enforced after every substage.
  * Units: h = 1, U_b = 1, nu = 1/Re_b.
@@ -441,7 +444,7 @@ class OpenChannelDNS {
   constructor(opt) {
     const o = Object.assign({
       Re: 3200, Lx: 4, Lz: 2, Nx: 64, Ny: 64, Nz: 64,
-      stretch: 1.8, cfl: 1.2, init: "turbulent", amp: 0.3, seed: 1, tavg: 50,
+      stretch: 1.8, cfl: 2.5, rk: 4, init: "turbulent", amp: 0.3, seed: 1, tavg: 50,
     }, opt || {});
     this.opt = o;
     this.Re = o.Re; this.nu = 1 / o.Re;
@@ -497,10 +500,20 @@ class OpenChannelDNS {
     // implicit-diffusion scratch
     this.tcp = new Float64Array(Ny + 1); this.tden = new Float64Array(Ny + 1);
 
-    // RK3 (Wray) coefficients
-    this.G = [8 / 15, 5 / 12, 3 / 4];
-    this.Z = [0, -17 / 60, -5 / 12];
-    this.A = [8 / 15, 2 / 15, 1 / 3];
+    // low-storage RK3 coefficients: G (new RHS), Z (previous RHS), A = G + Z (stage weight, also of the
+    // Crank-Nicolson term), C = stage start times / dt
+    if (o.rk === 3) { // Wray
+      this.G = [8 / 15, 5 / 12, 3 / 4];
+      this.Z = [0, -17 / 60, -5 / 12];
+      this.A = [8 / 15, 2 / 15, 1 / 3];
+    } else if (o.rk === 4) { // four stages, SIMSON user guide (Table 5.1): amplification polynomial of RK4
+      this.G = [8 / 17, 17 / 60, 5 / 12, 3 / 4];
+      this.Z = [0, -15 / 68, -17 / 60, -5 / 12];
+      this.A = [8 / 17, 16 / 255, 2 / 15, 1 / 3];
+    } else throw new Error("rk must be 3 or 4");
+    this.C = [0];
+    for (let s = 1; s < this.A.length; s++) this.C.push(this.C[s - 1] + this.A[s - 1]);
+    this.forcing = null; // optional f(t, solver) adding a body force into Hu, Hv, Hw (manufactured solutions)
 
     this.t = 0; this.nstep = 0; this.dt = 0;
     this.dtVisc = 2.0 / (4 * this.nu * (1 / (this.dx * this.dx) + 1 / (this.dz * this.dz)));
@@ -884,13 +897,16 @@ class OpenChannelDNS {
     return dt;
   }
 
-  step() {
-    const dt = this.computeDt(false);
+  // One time step; dtFixed (optional) replaces the CFL-based time step.
+  step(dtFixed) {
+    let dt;
+    if (dtFixed > 0) { this.computeDt(false); dt = this.dt = dtFixed; } else dt = this.computeDt(false);
     this._idx = 1 / this.dx; this._idz = 1 / this.dz;
     let dp = 0;
-    for (let s = 0; s < 3; s++) {
+    for (let s = 0; s < this.A.length; s++) {
       const g = this.G[s], z = this.Z[s], a = this.A[s];
       this.computeRHS();
+      if (this.forcing) this.forcing(this.t + this.C[s] * dt, this);
       const { u, v, w, Hu, Hv, Hw, Hu1, Hv1, Hw1, du, dv, dw } = this;
       for (let I = 0; I < u.length; I++) {
         du[I] = dt * (g * Hu[I] + z * Hu1[I] + a * du[I]);
@@ -1081,7 +1097,7 @@ class OpenChannelDNS {
 "use strict";
 (() => {
 const $ = (id) => document.getElementById(id);
-const DEFAULTS = { Re: "3200", Lx: "4", Lz: "2", Nx: "64", Ny: "64", Nz: "64", stretch: "1.8", cfl: "1.2", tavg: "50", threads: "4", init: "turbulent", amp: "0.3", seed: "1" };
+const DEFAULTS = { Re: "3200", Lx: "4", Lz: "2", Nx: "64", Ny: "64", Nz: "64", stretch: "1.8", cfl: "2.5", tavg: "50", threads: "4", init: "turbulent", amp: "0.3", seed: "1" };
 const FORM = { Re: "iRe", Lx: "iLx", Lz: "iLz", Nx: "iNx", Ny: "iNy", Nz: "iNz", stretch: "iSt", cfl: "iCfl", tavg: "iTavg", threads: "iThreads", init: "iInit", amp: "iAmp", seed: "iSeed" };
 const STORE_KEY = "ocdns-setup-v2";  // v2: new default case (Re_b 3200, 64 x 64 x 64)
 // In the Android app the C++ solver can use several CPU threads; offer 1 .. number of cores.
@@ -1120,7 +1136,7 @@ function readForm() {
   chk("Re", p.Re >= 10 && p.Re <= 50000);
   chk("Lx", p.Lx > 0.05 && p.Lx <= 100); chk("Lz", p.Lz > 0.05 && p.Lz <= 100);
   chk("Nx", p.Nx >= 4 && p.Nx <= 512); chk("Ny", p.Ny >= 4 && p.Ny <= 512); chk("Nz", p.Nz >= 4 && p.Nz <= 512);
-  chk("stretch", p.stretch >= 0 && p.stretch <= 4); chk("cfl", p.cfl > 0 && p.cfl <= 1.7);
+  chk("stretch", p.stretch >= 0 && p.stretch <= 4); chk("cfl", p.cfl > 0 && p.cfl <= 3.5);
   chk("tavg", p.tavg >= 0); chk("amp", p.amp >= 0 && p.amp <= 2); chk("seed", Number.isFinite(p.seed)); chk("threads", p.threads >= 1 && p.threads <= 16);
   for (const k in FORM) $(FORM[k]).setAttribute("aria-invalid", bad[k] ? "true" : "false");
   return { p, raw, bad };
@@ -1154,6 +1170,7 @@ function saveForm() { try { const { raw } = readForm(); localStorage.setItem(STO
 function loadForm() {
   let raw = null; try { raw = JSON.parse(localStorage.getItem(STORE_KEY) || "null"); } catch {}
   const src = Object.assign({}, DEFAULTS, raw || {});
+  if (raw && raw.cfl === "1.2") src.cfl = DEFAULTS.cfl;  // old default (three-stage RK3) -> new default
   for (const k in FORM) $(FORM[k]).value = src[k];
 }
 
@@ -1523,7 +1540,7 @@ function init() {
   setupThreadsField(); loadForm(); updateDerived();
   buildLuts();
   const { p, bad } = readForm();
-  start(Object.keys(bad).length ? Object.assign({}, p, { Re: 3200, Lx: 4, Lz: 2, Nx: 64, Ny: 64, Nz: 64, stretch: 1.8, cfl: 1.2, tavg: 50, amp: 0.3, seed: 1, threads: 4 }) : p);
+  start(Object.keys(bad).length ? Object.assign({}, p, { Re: 3200, Lx: 4, Lz: 2, Nx: 64, Ny: 64, Nz: 64, stretch: 1.8, cfl: 2.5, tavg: 50, amp: 0.3, seed: 1, threads: 4 }) : p);
   bindPointer("plan", (fx, fy) => { sel.i = Math.floor(fx * G.Nx); sel.k = Math.floor((1 - fy) * G.Nz); });
   bindPointer("side", (fx, fy) => { sel.i = Math.floor(fx * G.Nx); sel.j = yToJ(1 - fy); $("ySlider").value = sel.j; });
   bindPointer("end", (fx, fy) => { sel.k = Math.floor(fx * G.Nz); sel.j = yToJ(1 - fy); $("ySlider").value = sel.j; });

@@ -2,8 +2,9 @@
 //
 // No-slip wall at y = 0, free-slip surface at y = h = 1, periodic in x and z.
 // Second-order finite differences on a staggered (MAC) grid, stretched in y.
-// Low-storage RK3 (Wray) for convection and x/z diffusion, Crank-Nicolson for
-// wall-normal diffusion, fractional-step projection at every stage with an
+// Low-storage third-order Runge-Kutta for convection and x/z diffusion (four stages
+// after the SIMSON user guide by default, Params::rk = 3 for Wray's three stages),
+// Crank-Nicolson for wall-normal diffusion, fractional-step projection at every stage with an
 // FFT (x, z) + tridiagonal (y) Poisson solver. Constant streamwise mass flux
 // (U_b = 1); no mean spanwise pressure gradient. Units: h = 1, U_b = 1, nu = 1/Re_b.
 //
@@ -259,7 +260,8 @@ struct Rng {
 struct Params {
   double Re = 3200, Lx = 4, Lz = 2;
   int Nx = 64, Ny = 64, Nz = 64;
-  double stretch = 1.8, cfl = 1.2, amp = 0.3, tavg = 50;
+  double stretch = 1.8, cfl = 2.5, amp = 0.3, tavg = 50;
+  int rk = 4;        // Runge-Kutta stages: 4 (SIMSON; default case up to CFL ~3.8) or 3 (Wray; up to ~3.0)
   bool laminar = false;
   uint32_t seed = 1;
   int threads = 0;  // 0 = default (4, or fewer if the device has fewer cores)
@@ -361,12 +363,24 @@ class Solver {
   int threads() const { return pool.size(); }
 
   // ------------------------------------------------------------ time step
-  void step() {
-    const double DT = computeDt(false);
+  // Optional body force for manufactured-solution tests: called after the right-hand side of every stage
+  // with the stage time; adds the force into Hu, Hv, Hw (layouts as u, v, w).
+  std::function<void(double, real*, real*, real*)> forcing;
+
+  // One time step; dtFixed > 0 replaces the CFL-based time step.
+  void step(double dtFixed = 0) {
+    double DT = computeDt(false);
+    if (dtFixed > 0) DT = dt = dtFixed;
+    const double* G = P.rk == 3 ? G3 : G4;
+    const double* Z = P.rk == 3 ? Z3 : Z4;
+    const double* A = P.rk == 3 ? A3 : A4;
+    const double* C = P.rk == 3 ? C3 : C4;
+    const int ns = P.rk == 3 ? 3 : 4;
     double dp = 0;
-    for (int s = 0; s < 3; ++s) {
+    for (int s = 0; s < ns; ++s) {
       const real g = real(G[s]), z = real(Z[s]), a = real(A[s]), rdt = real(DT);
       computeRHS();
+      if (forcing) forcing(t + C[s] * DT, Hu.data(), Hv.data(), Hw.data());
       const size_t N3 = u.size(), nv = size_t(n) * Ny;
       pool.run(int(Ny), [&](int b, int e) {
         for (size_t I = size_t(b) * n; I < size_t(e) * n; ++I) {
@@ -397,6 +411,21 @@ class Solver {
     accumulate(DT);
     if (!avgOn && t >= P.tavg) { resetStats(); avgOn = true; }
     if (nstep % 5 == 0) record();
+  }
+
+  // Replace the velocity field (layouts as u, v, w; v includes the wall and surface levels) at time t0,
+  // made discretely divergence free with U_b = 1; used by the manufactured-solution test.
+  void setState(const std::vector<double>& u0, const std::vector<double>& v0, const std::vector<double>& w0, double t0) {
+    for (size_t I = 0; I < u.size(); ++I) { u[I] = real(u0[I]); w[I] = real(w0[I]); }
+    for (size_t I = 0; I < v.size(); ++I) v[I] = real(v0[I]);
+    project(1);
+    fixFlux(1);
+    std::fill(Hu1.begin(), Hu1.end(), real(0)); std::fill(Hv1.begin(), Hv1.end(), real(0));
+    std::fill(Hw1.begin(), Hw1.end(), real(0));
+    t = t0; dt = 0; nstep = 0;
+  }
+  void getState(std::vector<double>& u0, std::vector<double>& v0, std::vector<double>& w0) const {
+    u0.assign(u.begin(), u.end()); v0.assign(v.begin(), v.end()); w0.assign(w.begin(), w.end());
   }
 
   bool finite() const { return std::isfinite(u[0]) && std::isfinite(v[n]) && std::isfinite(w[0]); }
@@ -536,9 +565,16 @@ class Solver {
   }
   size_t idx(int i, int j, int k) const { return size_t(i) + size_t(Nx) * k + size_t(n) * j; }
 
-  static constexpr double G[3] = {8.0 / 15, 5.0 / 12, 3.0 / 4};
-  static constexpr double Z[3] = {0, -17.0 / 60, -5.0 / 12};
-  static constexpr double A[3] = {8.0 / 15, 2.0 / 15, 1.0 / 3};
+  // low-storage RK3: G (new RHS), Z (previous RHS), A = G + Z (stage weight, also of Crank-Nicolson),
+  // C = stage start times / dt. Wray (3 stages) and the SIMSON user guide, Table 5.1 (4 stages).
+  static constexpr double G3[3] = {8.0 / 15, 5.0 / 12, 3.0 / 4};
+  static constexpr double Z3[3] = {0, -17.0 / 60, -5.0 / 12};
+  static constexpr double A3[3] = {8.0 / 15, 2.0 / 15, 1.0 / 3};
+  static constexpr double C3[3] = {0, 8.0 / 15, 2.0 / 3};
+  static constexpr double G4[4] = {8.0 / 17, 17.0 / 60, 5.0 / 12, 3.0 / 4};
+  static constexpr double Z4[4] = {0, -15.0 / 68, -17.0 / 60, -5.0 / 12};
+  static constexpr double A4[4] = {8.0 / 17, 16.0 / 255, 2.0 / 15, 1.0 / 3};
+  static constexpr double C4[4] = {0, 8.0 / 17, 8.0 / 15, 2.0 / 3};
 
   Pool pool;
   FFT1 fx, fz;
