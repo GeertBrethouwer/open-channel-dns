@@ -16,7 +16,7 @@
   --accent-ink: #ffffff;
   --wall: #131820;
   --ok: #0ca30c;
-  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #b07800;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #b07800; --s5: #8a4fd6;
   --ref: #8b93a1;
   --font-body: "Atkinson Hyperlegible", "Segoe UI", system-ui, -apple-system, sans-serif;
   --font-data: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -26,14 +26,14 @@
   :root:not([data-theme="light"]) {
     --bg: #0f1216; --panel: #171b21; --ink: #e8ecf1; --muted: #9aa4b3; --line: #2a313b;
     --accent: #6da7ec; --accent-ink: #0b1220; --wall: #e8ecf1;
-    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --ref: #6f7887;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #a274ee; --ref: #6f7887;
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --bg: #0f1216; --panel: #171b21; --ink: #e8ecf1; --muted: #9aa4b3; --line: #2a313b;
   --accent: #6da7ec; --accent-ink: #0b1220; --wall: #e8ecf1;
-  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --ref: #6f7887;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #a274ee; --ref: #6f7887;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -226,6 +226,8 @@ details.about p { max-width: 65ch; margin: 8px 0 0; }
         <span><i style="background:var(--s2)"></i>v′<sub>rms</sub></span>
         <span><i style="background:var(--s3)"></i>w′<sub>rms</sub></span>
         <span><i style="background:var(--s4)"></i>−u′v′</span>
+        <span><i style="background:var(--s5)"></i>total shear stress dU⁺/dy⁺ − u′v′</span>
+        <span><i class="dash"></i>1 − y⁺/Re<sub>τ</sub> (converged)</span>
       </div>
       <div class="avg-row"><span id="avgInfo">Averaging starts at t = 50.</span><button type="button" id="resetAvg">Restart averaging now</button></div>
     </section>
@@ -277,7 +279,7 @@ details.about p { max-width: 65ch; margin: 8px 0 0; }
         <p>Incompressible Navier–Stokes in a box periodic in x and z, with a no-slip wall at y = 0 and a free-slip, rigid-lid surface at y = h (∂u/∂y = ∂w/∂y = 0, v = 0). Lengths are scaled by h and velocities by the bulk velocity U<sub>b</sub>, so ν = 1/Re<sub>b</sub>.</p>
         <p>Second-order central differences on a staggered (MAC) grid, with the convective terms in divergence form. The grid is uniform in x and z and clustered at the wall with a tanh mapping in y; the surface end is left coarse.</p>
         <p>Time stepping uses a low-storage four-stage, third-order Runge–Kutta scheme (from the SIMSON user guide) for convection and the x–z viscous terms, and Crank–Nicolson for the wall-normal viscous term. At large time steps its time error is several times smaller than that of the three-stage scheme of Wray, and it stays stable up to CFL ≈ 3.8 (Wray: ≈ 3.0). Each stage ends with a projection: the pressure Poisson equation is solved exactly with FFTs in x and z (modified wavenumbers) and a tridiagonal solve in y. After every stage a uniform streamwise pressure gradient restores U<sub>b</sub> = 1, so the mass flux stays constant. There is no mean spanwise pressure gradient; the initial field has no mean spanwise flow, and any mean spanwise flow that develops in a small box is left free and averages out over long times. Δt follows the CFL number you set.</p>
-        <p>The initial field is a mean profile plus a few divergence-free large-scale modes (streamwise and spanwise wavelengths of the box size and its halves and thirds) with a little noise. Re<sub>τ</sub> is taken from the mean wall shear. The default case (Re<sub>b</sub> = 3200, Re<sub>τ</sub> ≈ 200, a 4h × 2h box on a 64 × 64 × 64 grid) has Δx⁺ ≈ 13 and Δz⁺ ≈ 6, which is coarse for a second-order scheme, so treat the statistics as indicative.</p>
+        <p>The initial field is a mean profile plus a few divergence-free large-scale modes (streamwise and spanwise wavelengths of the box size and its halves and thirds) with a little noise. Re<sub>τ</sub> is taken from the mean wall shear. The Reynolds-stress plot also shows the total shear stress, the viscous stress dU⁺/dy⁺ plus −u′v′⁺. With the constant mass flux the mean momentum balance makes it linear once the statistics have converged: 1 at the wall and 0 at the free surface, 1 − y⁺/Re<sub>τ</sub>. The default case (Re<sub>b</sub> = 3200, Re<sub>τ</sub> ≈ 200, a 4h × 2h box on a 64 × 64 × 64 grid) has Δx⁺ ≈ 13 and Δz⁺ ≈ 6, which is coarse for a second-order scheme, so treat the statistics as indicative.</p>
       </details>
     </section>
   </div>
@@ -1449,11 +1451,25 @@ function bindHover(id) {
   c.addEventListener("pointerleave", () => { c._hover = null; const t = c.parentElement.querySelector(".tip"); if (t) t.hidden = true; drawPlots(); });
 }
 
+// Viscous stress dU+/dy+ (second-order differences on the stretched grid, U+ = 0 at the wall, dU+/dy+ = 0 at
+// the free-slip surface y+ = Re_tau) plus the Reynolds shear stress -u'v'+.
+function totalStress(P) {
+  const y = P.yp, U = P.Up, n = y.length, out = new Array(n);
+  for (let j = 0; j < n; j++) {
+    const ym = j > 0 ? y[j - 1] : 0, Um = j > 0 ? U[j - 1] : 0;
+    const yp = j < n - 1 ? y[j + 1] : 2 * P.reTau - y[j], Upl = j < n - 1 ? U[j + 1] : U[j];
+    const hm = y[j] - ym, hp = yp - y[j];
+    const dU = ((Upl - U[j]) * hm / hp + (U[j] - Um) * hp / hm) / (hm + hp);
+    out[j] = dU + P.uv[j];
+  }
+  return out;
+}
+
 function drawPlots() {
   if (!backend) return;
   const P = backend.profiles(), x0 = Math.max(0.1, Math.pow(10, Math.floor(Math.log10(P.yp[0])))), x1 = Math.max(P.reTau * 1.05, 10);
   const yl = []; for (let k = 0; k <= 60; k++) { const y = x0 * Math.pow(x1 / x0, k / 60); yl.push(y); }
-  const s1 = css("--s1"), s2 = css("--s2"), s3 = css("--s3"), s4 = css("--s4"), ref = css("--ref");
+  const s1 = css("--s1"), s2 = css("--s2"), s3 = css("--s3"), s4 = css("--s4"), s5 = css("--s5"), ref = css("--ref");
   const Umax = Math.max(...P.Up), Wmin = Math.min(0, ...P.Wp);
   drawChart($("pMean"), {
     xlog: true, x0, x1, y0: Wmin < -0.5 ? Math.floor(Wmin) : 0, y1: Math.max(20, Math.ceil(Umax / 5) * 5), xlabel: "y⁺", xname: "y⁺",
@@ -1465,11 +1481,15 @@ function drawPlots() {
     ],
   });
   const rmax = Math.max(3, ...P.urms);
+  // total shear stress (viscous + Reynolds) in wall units; in a converged state it equals 1 - y+/Re_tau
+  const tot = totalStress(P), ylin = yl.filter((y) => y <= P.reTau).concat([P.reTau]);
   drawChart($("pRms"), {
-    xlog: true, x0, x1, y0: Math.min(0, ...P.uv), y1: Math.ceil(rmax), xlabel: "y⁺", xname: "y⁺",
+    xlog: true, x0, x1, y0: Math.min(0, ...P.uv, ...tot), y1: Math.ceil(rmax), xlabel: "y⁺", xname: "y⁺",
     series: [
+      { x: ylin, y: ylin.map((y) => 1 - y / P.reTau), color: ref, width: 1.5, dash: [5, 4], hover: false },
       { x: P.yp, y: P.urms, color: s1, label: "u′" }, { x: P.yp, y: P.vrms, color: s2, label: "v′" },
       { x: P.yp, y: P.wrms, color: s3, label: "w′" }, { x: P.yp, y: P.uv, color: s4, label: "−u′v′" },
+      { x: P.yp, y: tot, color: s5, label: "total" },
     ],
   });
   const h = backend.history(), ht = h.t;
